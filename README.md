@@ -25,6 +25,7 @@ A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - 
 - Surround: mono up to 16 channels (9.1.6) in the plugin layout; bands apply to every channel
 - Character: Clean / Subtle / Warm, output gain, phase invert
 - Real-time pre/post analyzer, display range 3/6/12/30 dB
+- Frequency range 10 Hz to 20 kHz. "Piano" toggle (bottom bar) shows a piano keyboard strip under the display (one key per semitone on the same frequency axis): the selected band's key lights up with its note name + frequency, and hovering shows the note under the mouse
 - Interactive display: double-click = add band, drag = freq/gain, wheel = Q, right-click = type/dynamic/delete, double-click a node = remove
 
 ## Look and mouse
