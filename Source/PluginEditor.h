@@ -48,7 +48,7 @@ private:
 
     RajvikEQAudioProcessor& proc;
     bool dragging = false;
-    float hoverX = -1.0f;
+    float hoverX = -1.0f, hoverY = -1.0f;
     int capMode = 0, refN = 0, srcN = 0;
     std::array<double, 2049> refAcc {}, srcAcc {};
     std::vector<juce::Point<float>> sketch;

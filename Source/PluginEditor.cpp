@@ -180,7 +180,7 @@ void EQDisplay::paint (juce::Graphics& g)
             const float hq = 1.0f / qq, hi = f0 * 0.5f * (hq + std::sqrt (hq * hq + 4.0f)), lo = f0 * 0.5f * (-hq + std::sqrt (hq * hq + 4.0f));
             const float x1 = freqToX (lo), x2 = freqToX (hi);
             const float ty = h * (1.0f - juce::jlimit (0.0f, 1.0f, (apvtsVal (pid (sb, "thr")) + 100.0f) / 80.0f));
-            g.setColour (col.withAlpha (0.12f));
+            g.setColour (col.withAlpha (0.06f));
             g.fillRect (juce::Rectangle<float> (x1, 0.0f, juce::jmax (1.0f, x2 - x1), h));
             const float dash[] = { 6.0f, 4.0f };
             g.setColour (col.withAlpha (0.95f));
@@ -401,6 +401,38 @@ void EQDisplay::paint (juce::Graphics& g)
         g.drawEllipse (p.x - 7.0f, p.y - 7.0f, 14.0f, 14.0f, 1.3f);
         if (b == selected) { g.setColour (juce::Colours::white.withAlpha (0.75f)); g.drawEllipse (p.x - 11.0f, p.y - 11.0f, 22.0f, 22.0f, 1.2f); }
     }
+
+    // Pro-Q style readout next to the node: always for the selected band (also while dragging), and for the node under the mouse
+    {
+        const int hov = (hoverX >= 0.0f && ! dragging) ? hitTest ({ hoverX, hoverY }) : -1;
+        for (int b : { hov == selected ? -1 : hov, selected })
+        {
+            if (b < 0 || ! on[(size_t) b]) continue;
+            const float f = apvtsVal (pid (b, "freq"));
+            const int type = (int) apvtsVal (pid (b, "type"));
+            juce::String t1 = f >= 1000.0f ? juce::String (f / 1000.0f, 2) + " kHz" : juce::String (f, 1) + " Hz";
+            if (piano) t1 += "  " + noteName (f);
+            juce::String t2;
+            if (typeHasGain (type)) { const float gn = apvtsVal (pid (b, "gain")); t2 = (gn > 0.0f ? "+" : "") + juce::String (gn, 1) + " dB"; }
+            const auto np = nodePos (b);
+            const juce::String t = t2.isEmpty() ? t1 : t1 + "   " + t2;
+            const juce::Font fnt (juce::FontOptions (11.0f, juce::Font::bold));
+            juce::GlyphArrangement ga;
+            ga.addLineOfText (fnt, t, 0.0f, 0.0f);
+            const float bw = ga.getBoundingBox (0, -1, true).getWidth() + 14.0f, bh = 17.0f;
+            const float bx = juce::jlimit (3.0f, w - bw - 3.0f, np.x - bw * 0.5f);
+            float by = np.y - bh - 13.0f;
+            if (by < 3.0f) by = np.y + 13.0f;
+            const juce::Rectangle<float> rc (bx, by, bw, bh);
+            g.setColour (juce::Colour (0xd8151320));
+            g.fillRoundedRectangle (rc, 4.0f);
+            g.setColour (bandColour (b).withAlpha (0.8f));
+            g.drawRoundedRectangle (rc.reduced (0.5f), 4.0f, 1.0f);
+            g.setColour (juce::Colours::white.withAlpha (0.95f));
+            g.setFont (fnt);
+            g.drawText (t, rc.toNearestInt(), juce::Justification::centred);
+        }
+    }
 }
 
 void EQDisplay::mouseDown (const juce::MouseEvent& e)
@@ -457,8 +489,8 @@ void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
     }
 }
 
-void EQDisplay::mouseMove (const juce::MouseEvent& e) { hoverX = e.position.x; }
-void EQDisplay::mouseExit (const juce::MouseEvent&) { hoverX = -1.0f; }
+void EQDisplay::mouseMove (const juce::MouseEvent& e) { hoverX = e.position.x; hoverY = e.position.y; }
+void EQDisplay::mouseExit (const juce::MouseEvent&) { hoverX = -1.0f; hoverY = -1.0f; }
 
 void EQDisplay::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wd)
 {
