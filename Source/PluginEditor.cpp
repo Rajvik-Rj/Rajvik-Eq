@@ -24,8 +24,8 @@ float EQDisplay::dispRange() const
     static const float r[] = { 3.0f, 6.0f, 12.0f, 30.0f };
     return r[juce::jlimit (0, 3, (int) apvtsVal ("disp_range"))];
 }
-float EQDisplay::freqToX (float f) const { return (float) getWidth() * std::log (juce::jmax (f, 10.0f) / 10.0f) / std::log (3000.0f); }
-float EQDisplay::xToFreq (float x) const { return 10.0f * std::pow (3000.0f, x / (float) getWidth()); }
+float EQDisplay::freqToX (float f) const { return (float) getWidth() * std::log (juce::jmax (f, 10.0f) / 10.0f) / std::log (2000.0f); }
+float EQDisplay::xToFreq (float x) const { return 10.0f * std::pow (2000.0f, x / (float) getWidth()); }
 float EQDisplay::gainToY (float g) const { return (float) getHeight() * 0.5f * (1.0f - g / dispRange()); }
 float EQDisplay::yToGain (float y) const { return (1.0f - 2.0f * y / (float) getHeight()) * dispRange(); }
 
@@ -151,7 +151,7 @@ void EQDisplay::paint (juce::Graphics& g)
         g.setColour (juce::Colours::white.withAlpha (major ? 0.085f : 0.045f));
         g.drawVerticalLine ((int) x, 0.0f, h);
         g.setColour (juce::Colours::white.withAlpha (0.38f));
-        g.drawText (f >= 1000 ? juce::String (f / 1000) + "k" : juce::String ((int) f), (int) x - 20, (int) h - 18, 40, 14, juce::Justification::centred);
+        g.drawText (f >= 1000 ? juce::String (f / 1000) + "k" : juce::String ((int) f), juce::jmin ((int) x - 20, (int) w - 40), (int) h - 18, 40, 14, juce::Justification::centred);
     }
     const float range = dispRange();
     const float step = range <= 3.0f ? 1.0f : range <= 6.0f ? 2.0f : range <= 12.0f ? 3.0f : 10.0f;
@@ -307,14 +307,69 @@ void EQDisplay::paint (juce::Graphics& g)
         }
     }
 
+    // piano roll strip: one key per semitone on the same log frequency axis
+    const bool piano = apvtsVal ("notes") > 0.5f;
+    if (piano)
+    {
+        const float ky = h - 40.0f, kh = 22.0f;
+        g.setColour (juce::Colours::black.withAlpha (0.5f));
+        g.fillRect (0.0f, ky - 1.0f, w, kh + 2.0f);
+        const bool selOn = apvtsVal (pid (selected, "en")) > 0.5f;
+        const float selF = apvtsVal (pid (selected, "freq"));
+        auto noteNum = [] (float f) { return (int) std::lround (69.0 + 12.0 * std::log2 ((double) f / 440.0)); };
+        const int selN = selOn ? noteNum (selF) : -999;
+        const int hovN = hoverX >= 0.0f ? noteNum (xToFreq (hoverX)) : -999;
+        for (int n = 3; n <= 136; ++n)
+        {
+            const float fc = 440.0f * std::pow (2.0f, (float) (n - 69) / 12.0f);
+            const float x0 = freqToX (fc * std::pow (2.0f, -0.5f / 12.0f)), x1 = freqToX (fc * std::pow (2.0f, 0.5f / 12.0f));
+            if (x1 < 0.0f || x0 > w) continue;
+            const int pc = n % 12;
+            const bool blk = pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10;
+            const juce::Rectangle<float> kr (x0, ky, juce::jmax (1.0f, x1 - x0), kh);
+            juce::Colour base (0xffd9d6e6);
+            if (n == selN) base = bandColour (selected);
+            else if (n == hovN) base = juce::Colour (0xffffc857);
+            g.setColour (base.withAlpha (0.92f));
+            g.fillRect (kr);
+            if (blk)
+            {
+                g.setColour (n == selN ? bandColour (selected).darker (0.4f) : n == hovN ? juce::Colour (0xffb8860b) : juce::Colour (0xff17151f));
+                g.fillRect (kr.withHeight (kh * 0.62f));
+            }
+            g.setColour (juce::Colours::black.withAlpha (0.45f));
+            g.drawVerticalLine ((int) x0, ky, ky + kh);
+            if (pc == 0)
+            {
+                g.setColour (juce::Colour (0xff17151f));
+                g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+                g.drawText ("C" + juce::String (n / 12 - 1), kr.expanded (12.0f, 0.0f).withTrimmedTop (kh * 0.55f).toNearestInt(), juce::Justification::centred);
+            }
+        }
+        if (selOn)
+        {
+            const juce::String t = noteName (selF) + "  |  " + (selF >= 1000.0f ? juce::String (selF / 1000.0f, 2) + " kHz" : juce::String (selF, 1) + " Hz");
+            const float tw = 130.0f;
+            const juce::Rectangle<float> rc (juce::jlimit (0.0f, w - tw, freqToX (selF) - tw * 0.5f), ky - 22.0f, tw, 18.0f);
+            g.setColour (bandColour (selected).withAlpha (0.85f));
+            g.fillRoundedRectangle (rc, 5.0f);
+            g.setColour (juce::Colour (0xff17151f));
+            g.setFont (juce::Font (juce::FontOptions (12.0f, juce::Font::bold)));
+            g.drawText (t, rc.toNearestInt(), juce::Justification::centred);
+        }
+    }
+
     // hover frequency readout
     if (hoverX >= 0.0f && ! dragging)
     {
         const float f = xToFreq (hoverX);
-        const juce::String t = f >= 1000.0f ? juce::String (f / 1000.0f, 2) + " kHz" : juce::String ((int) f) + " Hz";
+        juce::String t = f >= 1000.0f ? juce::String (f / 1000.0f, 2) + " kHz" : juce::String ((int) f) + " Hz";
+        const bool showNotes = piano;
+        if (showNotes) t += "  " + noteName (f);
         g.setColour (juce::Colours::white.withAlpha (0.12f));
         g.drawVerticalLine ((int) hoverX, 0.0f, h);
-        const juce::Rectangle<float> rc (hoverX - 38.0f, h - 26.0f, 76.0f, 18.0f);
+        const float rw = showNotes ? 150.0f : 76.0f;
+        const juce::Rectangle<float> rc (juce::jlimit (0.0f, w - rw, hoverX - rw * 0.5f), h - 26.0f - (piano ? 62.0f : 0.0f), rw, 18.0f);
         g.setColour (juce::Colours::black.withAlpha (0.6f));
         g.fillRoundedRectangle (rc, 5.0f);
         g.setColour (Look::text);
@@ -366,7 +421,7 @@ void EQDisplay::mouseDrag (const juce::MouseEvent& e)
     if (sketchMode) { sketch.push_back (e.position); repaint(); return; }
     if (! dragging) return;
     const int b = selected;
-    setReal (pid (b, "freq"), juce::jlimit (10.0f, 30000.0f, xToFreq (e.position.x)));
+    setReal (pid (b, "freq"), juce::jlimit (10.0f, 20000.0f, xToFreq (e.position.x)));
     if (typeHasGain ((int) apvtsVal (pid (b, "type"))))
         setReal (pid (b, "gain"), juce::jlimit (-30.0f, 30.0f, yToGain (e.position.y)));
 }
@@ -394,7 +449,7 @@ void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
         setIndex (pid (b, "spec"), 0);
         setIndex (pid (b, "place"), Stereo);
         setReal (pid (b, "q"), 1.0f);
-        setReal (pid (b, "freq"), juce::jlimit (10.0f, 30000.0f, xToFreq (e.position.x)));
+        setReal (pid (b, "freq"), juce::jlimit (10.0f, 20000.0f, xToFreq (e.position.x)));
         setReal (pid (b, "gain"), juce::jlimit (-30.0f, 30.0f, yToGain (e.position.y)));
         setIndex (pid (b, "en"), 1);
         select (b);
@@ -475,7 +530,7 @@ void EQDisplay::fitToTarget (std::vector<float> r, int maxBands)
         while (xr < w - 1 && std::abs (r[(size_t) xr]) > half) ++xr;
         const float bw = juce::jlimit (0.15f, 6.0f, std::log2 (xToFreq ((float) xr + 1.0f) / xToFreq ((float) xl)));
         const float q = juce::jlimit (0.2f, 15.0f, 1.0f / (2.0f * std::sinh (0.5f * std::log (2.0f) * bw)));
-        const float f = juce::jlimit (10.0f, 30000.0f, xToFreq ((float) xs));
+        const float f = juce::jlimit (10.0f, 20000.0f, xToFreq ((float) xs));
         const float g = juce::jlimit (-30.0f, 30.0f, best);
 
         setIndex (pid (b, "type"), Bell);
@@ -862,6 +917,7 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     outL.setText ("Output", juce::dontSendNotification);
     addAndMakeVisible (analyzerBtn);
     addAndMakeVisible (invertBtn);
+    addAndMakeVisible (notesBtn);
     outSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     outSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 20);
     outSlider.setDoubleClickReturnValue (true, 0.0);
@@ -872,6 +928,7 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     rangeA    = std::make_unique<CA> (p.apvts, "disp_range", rangeBox);
     analyzerA = std::make_unique<BA> (p.apvts, "analyzer", analyzerBtn);
     invertA   = std::make_unique<BA> (p.apvts, "invert", invertBtn);
+    notesA    = std::make_unique<BA> (p.apvts, "notes", notesBtn);
     outA      = std::make_unique<SA> (p.apvts, "out_gain", outSlider);
 
     for (auto* b : { &sketchBtn, &instBtn, &refBtn, &srcBtn, &applyBtn }) addAndMakeVisible (b);
@@ -926,7 +983,7 @@ void RajvikEQAudioProcessorEditor::placePanel()
     const auto db = display.getBounds();
     const int pw = juce::jmin (panel.idealWidth(), db.getWidth() - 8), ph = BandPanel::totalHeight;
     const int x = db.getX() + (db.getWidth() - pw) / 2;
-    const int yBottom = db.getBottom() - ph - 20, yTop = db.getY() + 6;
+    const int yBottom = db.getBottom() - ph - 20 - (proc.apvts.getRawParameterValue ("notes")->load() > 0.5f ? 44 : 0), yTop = db.getY() + 6;
 
     const auto np = display.getNodePos (b) + db.getPosition().toFloat();
     const juce::Rectangle<float> bottomR ((float) x, (float) yBottom, (float) pw, (float) ph);
@@ -982,6 +1039,7 @@ void RajvikEQAudioProcessorEditor::resized()
     charBox.setBounds (bot.removeFromLeft (90));      bot.removeFromLeft (18);
     analyzerBtn.setBounds (bot.removeFromLeft (96));
     invertBtn.setBounds   (bot.removeFromLeft (120));
+    notesBtn.setBounds    (bot.removeFromLeft (80));
     outSlider.setBounds (bot.removeFromRight (250));
     outL.setBounds (bot.removeFromRight (56));
 

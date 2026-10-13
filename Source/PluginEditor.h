@@ -148,7 +148,7 @@ private:
 
     juce::ComboBox modeBox, charBox, rangeBox;
     juce::Label charL, outL;
-    juce::ToggleButton analyzerBtn { "Analyzer" }, invertBtn { "Phase Invert" };
+    juce::ToggleButton analyzerBtn { "Analyzer" }, invertBtn { "Phase Invert" }, notesBtn { "Piano" };
     juce::Slider outSlider;
     juce::TextButton sketchBtn { "EQ Sketch" }, instBtn { "Instances" }, refBtn { "Match: Reference" }, srcBtn { "Match: Source" }, applyBtn { "Match: Apply" };
 
@@ -156,7 +156,7 @@ private:
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::unique_ptr<CA> modeA, charA, rangeA;
-    std::unique_ptr<BA> analyzerA, invertA;
+    std::unique_ptr<BA> analyzerA, invertA, notesA;
     std::unique_ptr<SA> outA;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RajvikEQAudioProcessorEditor)

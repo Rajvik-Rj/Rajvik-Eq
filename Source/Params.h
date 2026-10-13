@@ -17,6 +17,17 @@ inline const juce::StringArray modeNames      { "Zero Latency", "Natural Phase",
 inline const juce::StringArray charNames      { "Clean", "Subtle", "Warm" };
 inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "30 dB" };
 
+// "A4 +12c" style note name for a frequency (A4 = 440 Hz)
+inline juce::String noteName (float f)
+{
+    if (f <= 0.0f) return {};
+    static const char* nm[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const double m = 69.0 + 12.0 * std::log2 ((double) f / 440.0);
+    const int n = (int) std::lround (m), cents = (int) std::lround ((m - n) * 100.0);
+    const int pc = ((n % 12) + 12) % 12, oct = (int) std::floor (n / 12.0) - 1;
+    return juce::String (nm[pc]) + juce::String (oct) + (cents == 0 ? juce::String() : " " + juce::String (cents > 0 ? "+" : "") + juce::String (cents) + "c");
+}
+
 inline juce::String pid (int band, const char* name) { return "b" + juce::String (band + 1) + "_" + name; }
 inline bool typeHasGain (int t) { return t == Bell || t == LowShelf || t == HighShelf || t == TiltShelf || t == FlatTilt; }
 
@@ -63,7 +74,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     {
         const String n = "Band " + String (b + 1) + " ";
 
-        NormalisableRange<float> fr (10.0f, 30000.0f, 0.01f);
+        NormalisableRange<float> fr (10.0f, 20000.0f, 0.01f);
         fr.setSkewForCentre (1000.0f);
         NormalisableRange<float> qr (0.025f, 40.0f, 0.001f);
         qr.setSkewForCentre (1.0f);
@@ -98,6 +109,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "disp_range", 1 }, "Display Range", rangeNames, 2));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "analyzer", 1 },   "Analyzer", true));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "invert", 1 },     "Phase Invert", false));
+    layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "notes", 1 },      "Piano View", false));
     return layout;
 }
 }
