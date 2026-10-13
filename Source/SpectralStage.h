@@ -38,6 +38,7 @@ public:
         for (int ch = 0; ch < 2; ++ch) { inBuf[(size_t) ch].fill (0.0f); outBuf[(size_t) ch].fill (0.0f); }
         for (auto& e : env) e.fill (-120.0f);
         pos = 0; hopCount = 0;
+        mask.fill (0.0f);
     }
 
     void setBands (const std::array<BandCfg, RP::numBands>& c)
@@ -84,6 +85,7 @@ public:
         }
     }
 
+    std::array<float, bins> mask {};            // live per-bin gain (dB) the stage applies, for the display
     std::array<float, RP::numBands> dynAt {};   // current dynamic offset (dB) at each band's centre bin
 
 private:
@@ -116,14 +118,29 @@ private:
             const float aR = 1.0f - std::exp (-hopSec / (juce::jmax (1.0f, bc.rel) * 0.001f));
             auto& e = env[(size_t) b];
             const auto& w = weight[(size_t) b];
+            float peakAmt = 0.0f;
             for (int k = lo_[(size_t) b]; k <= hi_[(size_t) b]; ++k)
             {
                 const float L = lvl[(size_t) k];
                 e[(size_t) k] += (L > e[(size_t) k] ? aA : aR) * (L - e[(size_t) k]);
-                gainDb[(size_t) k] += w[(size_t) k] * bc.range * amount (e[(size_t) k], bc);
+                const float am = amount (e[(size_t) k], bc);
+                gainDb[(size_t) k] += w[(size_t) k] * bc.range * am;
+                if (w[(size_t) k] > 0.5f) peakAmt = juce::jmax (peakAmt, am);
             }
-            const int kc = juce::jlimit (0, bins - 1, (int) std::lround (bc.freq * (float) N / (float) fs));
-            dynAt[(size_t) b] = bc.range * amount (e[(size_t) kc], bc);
+            dynAt[(size_t) b] = bc.range * peakAmt;   // strongest action inside the band (the peak need not be at the centre)
+        }
+
+        // smooth the gain mask across frequency (soft edges, peaks keep their full depth) so isolated bins do not produce "musical noise"
+        {
+            float prev = gainDb[0];
+            for (int k = 0; k < bins; ++k)
+            {
+                const float cur = gainDb[(size_t) k], next = k + 1 < bins ? gainDb[(size_t) k + 1] : cur;
+                const float sm = 0.25f * prev + 0.5f * cur + 0.25f * next;
+                gainDb[(size_t) k] = std::abs (sm) > std::abs (cur) ? sm : cur;   // soften edges, never weaken a peak
+                prev = cur;
+            }
+            mask = gainDb;
         }
 
         for (int ch = 0; ch < 2; ++ch)
@@ -146,9 +163,10 @@ private:
 
     static float amount (float level, const BandCfg& bc)
     {
-        const float x = juce::jlimit (0.0f, 1.0f, (level - bc.thr) / 12.0f + 0.5f);
-        const float s = x * x * (3.0f - 2.0f * x);
-        return bc.above ? s : 1.0f - s;
+        // nothing happens until a bin crosses the threshold; the full range is reached 12 dB past it
+        const float d = bc.above ? (level - bc.thr) : (bc.thr - level);
+        const float x = juce::jlimit (0.0f, 1.0f, d / 12.0f);
+        return x * x * (3.0f - 2.0f * x);
     }
 
     juce::dsp::FFT fft;

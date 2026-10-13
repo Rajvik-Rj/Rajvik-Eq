@@ -168,6 +168,53 @@ void EQDisplay::paint (juce::Graphics& g)
         if (overlayProc != nullptr) drawSpectrum (g, overlaySm, juce::Colour (0xffff9f43), 0.30f);
     }
 
+    // threshold + live spectral action of the selected dynamic band
+    {
+        const int sb = selected;
+        const int stype = (int) apvtsVal (pid (sb, "type"));
+        const int skind = dynModeOf (apvtsVal (pid (sb, "dyn")) > 0.5f, apvtsVal (pid (sb, "spec")) > 0.5f, stype);
+        if (apvtsVal (pid (sb, "en")) > 0.5f && skind != ModeNormal)
+        {
+            const auto col = bandColour (sb);
+            const float f0 = apvtsVal (pid (sb, "freq")), qq = juce::jmax (0.1f, apvtsVal (pid (sb, "q")));
+            const float hq = 1.0f / qq, hi = f0 * 0.5f * (hq + std::sqrt (hq * hq + 4.0f)), lo = f0 * 0.5f * (-hq + std::sqrt (hq * hq + 4.0f));
+            const float x1 = freqToX (lo), x2 = freqToX (hi);
+            const float ty = h * (1.0f - juce::jlimit (0.0f, 1.0f, (apvtsVal (pid (sb, "thr")) + 100.0f) / 80.0f));
+            g.setColour (col.withAlpha (0.12f));
+            g.fillRect (juce::Rectangle<float> (x1, 0.0f, juce::jmax (1.0f, x2 - x1), h));
+            const float dash[] = { 6.0f, 4.0f };
+            g.setColour (col.withAlpha (0.95f));
+            g.drawDashedLine (juce::Line<float> (x1 - 30.0f, ty, x2 + 30.0f, ty), dash, 2, 1.5f);
+            g.setFont (juce::Font (juce::FontOptions (11.5f)));
+            g.drawText (juce::String (apvtsVal (pid (sb, "thr")), 1) + " dB", (int) x1 - 30, (int) ty - 16, 70, 14, juce::Justification::left);
+
+            if (skind == ModeSpectral)
+            {
+                const auto& mk = proc.spectralStage().mask;
+                const double sfs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
+                juce::Path mp;
+                const float zy = gainToY (0.0f);
+                for (int x = 0; x < getWidth(); x += 2)
+                {
+                    const float pos = juce::jlimit (0.0f, (float) SpectralStage::bins - 2.0f, xToFreq ((float) x) * (float) SpectralStage::N / (float) sfs);
+                    const int k = (int) pos;
+                    const float fr = pos - (float) k;
+                    const float db = mk[(size_t) k] * (1.0f - fr) + mk[(size_t) k + 1] * fr;
+                    const float y = gainToY (juce::jlimit (-60.0f, 60.0f, db));
+                    if (x == 0) mp.startNewSubPath (0.0f, y); else mp.lineTo ((float) x, y);
+                }
+                juce::Path fillP (mp);
+                fillP.lineTo ((float) getWidth(), zy);
+                fillP.lineTo (0.0f, zy);
+                fillP.closeSubPath();
+                g.setColour (col.withAlpha (0.28f));
+                g.fillPath (fillP);
+                g.setColour (col);
+                g.strokePath (mp, juce::PathStrokeType (1.6f));
+            }
+        }
+    }
+
     // band designs (static gain + current dynamic offset)
     const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
     std::array<BandDesign, numBands> designs;

@@ -59,6 +59,8 @@ public:
     juce::String displayName();
     void updateTrackProperties (const TrackProperties& p) override;
 
+    const SpectralStage& spectralStage() const { return spec; }
+
     juce::AudioProcessorValueTreeState apvts;
     Analyzer preAnalyzer, postAnalyzer;
     std::array<std::atomic<float>, RP::numBands> dynDb;
