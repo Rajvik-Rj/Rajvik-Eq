@@ -13,6 +13,7 @@ public:
     int selected = 0;
     bool sketchMode = false;
     void setCapture (int mode) { capMode = mode; }
+    int getCapture() const { return capMode; }
     void applyMatch();
     void startPeakSearch() { peakListen = peakListen > 0 ? 0 : 75; peakAcc.fill (0.0); peakN = 0; }
     bool isListeningForPeaks() const { return peakListen > 0; }
@@ -145,6 +146,42 @@ private:
     std::unique_ptr<BA> enA, scA;
 };
 
+// Gear icon button for the settings panel
+class GearButton : public juce::Button
+{
+public:
+    GearButton() : juce::Button ("settings") { setTooltip ("Settings: GUI colour, size and display options"); }
+    void paintButton (juce::Graphics& g, bool hl, bool down) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1.0f);
+        if (hl || down) { g.setColour (juce::Colours::white.withAlpha (down ? 0.14f : 0.08f)); g.fillRoundedRectangle (r, 6.0f); }
+        const auto c = r.getCentre();
+        const float rad = juce::jmin (r.getWidth(), r.getHeight()) * 0.5f - 4.0f;
+        juce::Path teeth;
+        for (int i = 0; i < 8; ++i)
+        {
+            juce::Path t;
+            t.addRoundedRectangle (-rad * 0.18f, -rad, rad * 0.36f, rad * 0.40f, 1.0f);
+            teeth.addPath (t, juce::AffineTransform::rotation ((float) i * juce::MathConstants<float>::twoPi / 8.0f).translated (c.x, c.y));
+        }
+        g.setColour (hl || down ? Look::gold : Look::text);
+        g.fillPath (teeth);
+        const float rr = rad * 0.58f;
+        g.drawEllipse (c.x - rr, c.y - rr, 2.0f * rr, 2.0f * rr, rad * 0.40f);
+    }
+};
+
+// Everything of the editor lives in this view so the whole GUI can be scaled (Settings > GUI size)
+// independently of the host, while the window itself stays freely resizable.
+class RootView : public juce::Component
+{
+public:
+    std::function<void (juce::Graphics&)> paintFn;
+    std::function<void()> resizedFn;
+    void paint (juce::Graphics& g) override { if (paintFn) paintFn (g); }
+    void resized() override { if (resizedFn) resizedFn(); }
+};
+
 class RajvikEQAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -155,32 +192,39 @@ public:
 
 private:
     void timerCallback() override;
+    void paintRoot (juce::Graphics&);
+    void layoutRoot();
     void placePanel();
     void showPresetMenu();
+    void showToolsMenu();
+    void showSettings();
+    void applyLook();
+    void scaleChanged (float oldScale);
     void stepPreset (int dir);
     void promptSave();
 
-    static constexpr int headerH = 56, bottomH = 40, stripW = 100;
+    static constexpr int headerH = 34, bottomH = 26, stripW = 100;
+    static constexpr int minW = 1000, minH = 520, maxW = 2400, maxH = 1500;   // unscaled units
     RajvikEQAudioProcessor& proc;
     RajvikLAF laf;
+    RootView root;
     EQDisplay display;
     ScaleStrip strip;
     BandPanel panel;
     bool panelOnTop = false, panelOpen = false;
 
-    juce::ComboBox modeBox, charBox, rangeBox, anaViewBox;
-    juce::TextButton peaksBtn { "Auto Peaks" };
-    juce::Label charL, outL;
-    juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" };
-    juce::ToggleButton analyzerBtn { "Analyzer" }, invertBtn { "Phase Invert" }, notesBtn { "Piano" };
+    juce::ComboBox modeBox;
+    juce::Label outL;
+    juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" }, toolsBtn;
+    GearButton gearBtn;
+    juce::ToggleButton analyzerBtn { "Analyzer" };
     juce::Slider outSlider;
-    juce::TextButton sketchBtn { "EQ Sketch" }, instBtn { "Instances" }, refBtn { "Match: Reference" }, srcBtn { "Match: Source" }, applyBtn { "Match: Apply" };
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<CA> modeA, charA, rangeA, anaViewA;
-    std::unique_ptr<BA> analyzerA, invertA, notesA;
+    std::unique_ptr<CA> modeA;
+    std::unique_ptr<BA> analyzerA;
     std::unique_ptr<SA> outA;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RajvikEQAudioProcessorEditor)

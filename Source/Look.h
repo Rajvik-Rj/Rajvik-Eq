@@ -1,21 +1,93 @@
 #pragma once
 #include "Common.h"
 
-// Modern dark "glass" look: charcoal/purple background, gold accent, flat controls.
+// Modern dark "glass" look. Accent colour and background theme are user settings (gear icon in the editor).
 namespace Look
 {
-inline const juce::Colour gold  = juce::Colour (0xfff9c23c);
-inline const juce::Colour text  = juce::Colour (0xffe9e6f2);
-inline const juce::Colour muted = juce::Colour (0xff8f8aa0);
-inline const juce::Colour bgTop = juce::Colour (0xff221e2b);
-inline const juce::Colour bgBot = juce::Colour (0xff121016);
-inline const juce::Colour bar   = juce::Colour (0xff0d0c11);
+inline juce::Colour gold  { 0xfff9c23c };   // the accent colour (name kept: used all over the editor)
+inline juce::Colour text  { 0xffe9e6f2 };
+inline juce::Colour muted { 0xff8f8aa0 };
+inline juce::Colour bgTop { 0xff221e2b };
+inline juce::Colour bgBot { 0xff121016 };
+inline juce::Colour bar   { 0xff0d0c11 };
+
+struct Accent { const char* name; juce::uint32 argb; };
+struct Theme  { const char* name; juce::uint32 top, bot, bar; };
+
+constexpr int numAccents = 8, numThemes = 5;
+inline const Accent accents[numAccents] =
+{
+    { "Gold",   0xfff9c23c }, { "Cyan",   0xff39d0ff }, { "Green",  0xff3ddc97 }, { "Orange", 0xffff8a3d },
+    { "Red",    0xffff4d5e }, { "Pink",   0xffff6bcb }, { "Purple", 0xffa78bfa }, { "Blue",   0xff4d8dff }
+};
+inline const Theme themes[numThemes] =
+{
+    { "Midnight Purple", 0xff221e2b, 0xff121016, 0xff0d0c11 },
+    { "Graphite",        0xff2b2d31, 0xff17181b, 0xff101113 },
+    { "Deep Blue",       0xff182231, 0xff0c121b, 0xff080d14 },
+    { "Forest",          0xff1b2822, 0xff0c1411, 0xff080e0b },
+    { "Pure Black",      0xff131313, 0xff000000, 0xff000000 }
+};
+
+// Saved to <user app data>/RajvikEQ/settings.xml so it is shared by every instance and survives restarts.
+struct Prefs
+{
+    int accent = 0, theme = 0;
+    bool useCustom = false;
+    juce::uint32 custom = 0xfff9c23c;
+    float scale = 1.0f;          // GUI size: 0.6 .. 1.5
+    int width = 1060, height = 600;   // window size in unscaled units
+
+    static juce::File file()
+    {
+        return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("RajvikEQ").getChildFile ("settings.xml");
+    }
+
+    void load()
+    {
+        if (auto xml = juce::parseXML (file()))
+        {
+            accent    = juce::jlimit (0, numAccents - 1, xml->getIntAttribute ("accent", 0));
+            theme     = juce::jlimit (0, numThemes - 1, xml->getIntAttribute ("theme", 0));
+            useCustom = xml->getBoolAttribute ("useCustom", false);
+            custom    = (juce::uint32) xml->getStringAttribute ("custom", "fff9c23c").getHexValue64();
+            scale     = juce::jlimit (0.6f, 1.5f, (float) xml->getDoubleAttribute ("scale", 1.0));
+            width     = juce::jlimit (1000, 2400, xml->getIntAttribute ("width", 1060));
+            height    = juce::jlimit (520, 1500, xml->getIntAttribute ("height", 600));
+        }
+    }
+
+    void save() const
+    {
+        juce::XmlElement x ("RajvikEQSettings");
+        x.setAttribute ("accent", accent);
+        x.setAttribute ("theme", theme);
+        x.setAttribute ("useCustom", useCustom ? 1 : 0);
+        x.setAttribute ("custom", juce::String::toHexString ((juce::int64) custom));
+        x.setAttribute ("scale", (double) scale);
+        x.setAttribute ("width", width);
+        x.setAttribute ("height", height);
+        file().getParentDirectory().createDirectory();
+        file().replaceWithText (x.toString());
+    }
+
+    void apply() const
+    {
+        gold  = useCustom ? juce::Colour (custom).withAlpha (1.0f) : juce::Colour (accents[accent].argb);
+        bgTop = juce::Colour (themes[theme].top);
+        bgBot = juce::Colour (themes[theme].bot);
+        bar   = juce::Colour (themes[theme].bar);
+    }
+};
+inline Prefs prefs;
 }
 
 class RajvikLAF : public juce::LookAndFeel_V4
 {
 public:
-    RajvikLAF()
+    RajvikLAF() { refreshColours(); }
+
+    void refreshColours()
     {
         setColour (juce::ResizableWindow::backgroundColourId, Look::bgBot);
         setColour (juce::Label::textColourId, Look::muted);
@@ -33,6 +105,14 @@ public:
         setColour (juce::PopupMenu::highlightedBackgroundColourId, Look::gold.withAlpha (0.22f));
         setColour (juce::PopupMenu::highlightedTextColourId, Look::gold);
         setColour (juce::PopupMenu::headerTextColourId, Look::muted);
+    }
+
+    void drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics& g, const juce::Path& path, juce::Image&) override
+    {
+        g.setColour (juce::Colour (0xfa1c1924));
+        g.fillPath (path);
+        g.setColour (juce::Colours::white.withAlpha (0.14f));
+        g.strokePath (path, juce::PathStrokeType (1.0f));
     }
 
     juce::Font getComboBoxFont (juce::ComboBox&) override { return juce::Font (juce::FontOptions (13.0f)); }

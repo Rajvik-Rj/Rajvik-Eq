@@ -3,7 +3,7 @@
 #include "Params.h"
 
 // STFT based "Spectral Dynamics": every bin is compared against the band threshold and
-// only the bins that exceed it (inside the band's bell shape) are turned down/up.
+// only the bins that exceed it - and only inside the band's own Q width - are turned down/up.
 class SpectralStage
 {
 public:
@@ -53,17 +53,29 @@ public:
                 cachedFreq[(size_t) b] = bc.freq; cachedQ[(size_t) b] = bc.q;
                 int lo = bins, hi = -1;
                 auto& w = weight[(size_t) b];
+
+                // The band covers exactly the region the display shades: its bell edges f0/Q wide.
+                // Weight is 1 at the centre, 0.5 at the band edges and falls to zero just outside them,
+                // so only the bins inside the band (and a short skirt) react. More Q = narrower, less Q = wider.
+                const double f0 = juce::jmax (10.0, (double) bc.freq);
+                const double hq = 1.0 / juce::jmax (0.025, (double) bc.q);
+                const double rt = std::sqrt (hq * hq + 4.0);
+                const double fHi = f0 * 0.5 * (hq + rt), fLo = f0 * 0.5 * (-hq + rt);
+                double halfOct = 0.5 * std::log2 (fHi / fLo);
+                halfOct = juce::jmax (halfOct, std::log2 (1.0 + fs / (double) N / f0));   // never narrower than one FFT bin
+
                 for (int k = 0; k < bins; ++k)
                 {
                     const double f = (double) k * fs / (double) N;
                     double wt = 0.0;
                     if (k > 0)
                     {
-                        const double x = (double) bc.q * (f / bc.freq - bc.freq / f);
-                        wt = 1.0 / (1.0 + x * x);
+                        const double t = std::abs (std::log2 (f / f0)) / halfOct;
+                        wt = std::exp (-0.693147 * t * t * t * t);   // flat top, steep sides
+                        if (wt < 0.01) wt = 0.0;
                     }
                     w[(size_t) k] = (float) wt;
-                    if (wt > 0.01) { lo = juce::jmin (lo, k); hi = juce::jmax (hi, k); }
+                    if (wt > 0.0) { lo = juce::jmin (lo, k); hi = juce::jmax (hi, k); }
                 }
                 lo_[(size_t) b] = lo; hi_[(size_t) b] = hi;
             }

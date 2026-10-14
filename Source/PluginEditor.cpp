@@ -1183,7 +1183,7 @@ void ScaleStrip::paint (juce::Graphics& g)
     }
 
     // level meters
-    const float top = 30.0f, bottom = h - 8.0f;
+    const float top = 12.0f, bottom = h - 8.0f;
     const float xs[2] = { 80.0f, 90.0f };
     const float lv[2] = { lvL, lvR };
     for (int i = 0; i < 2; ++i)
@@ -1202,15 +1202,239 @@ void ScaleStrip::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+// Settings panel (gear icon): GUI colour, background, GUI size and the less used display options
+namespace
+{
+class Swatch : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    Swatch (juce::Colour a, juce::Colour b, int k) : c1 (a), c2 (b), kind (k) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    std::function<void()> onClick;
+    bool selected = false;
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (isMouseOver() ? 2.0f : 3.0f);
+        if (kind == 2)
+        {
+            juce::ColourGradient grad (juce::Colour (0xffff4d5e), r.getX(), r.getY(), juce::Colour (0xff4d8dff), r.getRight(), r.getBottom(), false);
+            grad.addColour (0.33, juce::Colour (0xfff9c23c));
+            grad.addColour (0.66, juce::Colour (0xff3ddc97));
+            g.setGradientFill (grad);
+        }
+        else if (kind == 1) g.setGradientFill (juce::ColourGradient (c1, r.getX(), r.getY(), c2, r.getX(), r.getBottom(), false));
+        else g.setColour (c1);
+        g.fillEllipse (r);
+        g.setColour (juce::Colours::white.withAlpha (0.18f));
+        g.drawEllipse (r, 1.0f);
+        if (selected)
+        {
+            g.setColour (juce::Colours::white);
+            g.drawEllipse (getLocalBounds().toFloat().reduced (0.8f), 1.8f);
+        }
+    }
+    void mouseEnter (const juce::MouseEvent&) override { repaint(); }
+    void mouseExit (const juce::MouseEvent&) override { repaint(); }
+    void mouseUp (const juce::MouseEvent& e) override { if (onClick && getLocalBounds().contains (e.getPosition())) onClick(); }
+
+private:
+    juce::Colour c1, c2;
+    int kind;   // 0 solid, 1 two tone (background themes), 2 rainbow (custom colour)
+};
+
+class AccentPicker : public juce::Component, private juce::ChangeListener
+{
+public:
+    AccentPicker (juce::Colour start, std::function<void (juce::Colour)> cb)
+        : onPick (std::move (cb)), sel (juce::ColourSelector::showSliders | juce::ColourSelector::showColourspace, 4, 4)
+    {
+        sel.setCurrentColour (start);
+        sel.addChangeListener (this);
+        addAndMakeVisible (sel);
+        setSize (260, 300);
+    }
+    ~AccentPicker() override { sel.removeChangeListener (this); }
+    void resized() override { sel.setBounds (getLocalBounds()); }
+
+private:
+    void changeListenerCallback (juce::ChangeBroadcaster*) override { if (onPick) onPick (sel.getCurrentColour().withAlpha (1.0f)); }
+    std::function<void (juce::Colour)> onPick;
+    juce::ColourSelector sel;
+};
+
+class SettingsPanel : public juce::Component
+{
+public:
+    SettingsPanel (RajvikEQAudioProcessor& p, juce::Component& hostComp, std::function<void()> look, std::function<void (float)> scale)
+        : proc (p), host (hostComp), onLook (std::move (look)), onScale (std::move (scale)), customSw (juce::Colour(), juce::Colour(), 2)
+    {
+        for (int i = 0; i < Look::numAccents; ++i)
+        {
+            auto s = std::make_unique<Swatch> (juce::Colour (Look::accents[i].argb), juce::Colour(), 0);
+            s->setTooltip (Look::accents[i].name);
+            s->onClick = [this, i] { Look::prefs.useCustom = false; Look::prefs.accent = i; changed(); };
+            addAndMakeVisible (*s);
+            accentSw.push_back (std::move (s));
+        }
+        customSw.setTooltip ("Custom colour");
+        customSw.onClick = [this] { pickCustom(); };
+        addAndMakeVisible (customSw);
+        for (int i = 0; i < Look::numThemes; ++i)
+        {
+            auto s = std::make_unique<Swatch> (juce::Colour (Look::themes[i].top).brighter (0.25f), juce::Colour (Look::themes[i].bot), 1);
+            s->setTooltip (Look::themes[i].name);
+            s->onClick = [this, i] { Look::prefs.theme = i; changed(); };
+            addAndMakeVisible (*s);
+            themeSw.push_back (std::move (s));
+        }
+
+        scaleSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        scaleSlider.setRange (60.0, 150.0, 5.0);
+        scaleSlider.setValue ((double) Look::prefs.scale * 100.0, juce::dontSendNotification);
+        scaleSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 56, 20);
+        scaleSlider.setTextValueSuffix (" %");
+        scaleSlider.setDoubleClickReturnValue (true, 100.0);
+        scaleSlider.onDragEnd = [this] { applyScale(); };
+        scaleSlider.onValueChange = [this] { if (! scaleSlider.isMouseButtonDown()) applyScale(); };
+        addAndMakeVisible (scaleSlider);
+
+        charBox.addItemList (RP::charNames, 1);
+        rangeBox.addItemList (RP::rangeNames, 1);
+        anaViewBox.addItemList (RP::anaViewNames, 1);
+        for (auto* c : std::initializer_list<juce::Component*> { &charBox, &rangeBox, &anaViewBox, &analyzerBtn, &notesBtn, &invertBtn }) addAndMakeVisible (c);
+        charA     = std::make_unique<CA> (proc.apvts, "character", charBox);
+        rangeA    = std::make_unique<CA> (proc.apvts, "disp_range", rangeBox);
+        anaViewA  = std::make_unique<CA> (proc.apvts, "ana_view", anaViewBox);
+        analyzerA = std::make_unique<BA> (proc.apvts, "analyzer", analyzerBtn);
+        notesA    = std::make_unique<BA> (proc.apvts, "notes", notesBtn);
+        invertA   = std::make_unique<BA> (proc.apvts, "invert", invertBtn);
+
+        refreshSelection();
+        setSize (320, 372);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (Look::gold);
+        g.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        g.drawText ("SETTINGS", 18, 10, 200, 18, juce::Justification::left);
+        g.setColour (Look::muted);
+        g.setFont (juce::Font (juce::FontOptions (12.0f)));
+        for (auto& l : labels) g.drawText (l.first, l.second, juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        labels.clear();
+        const int x0 = 18;
+        int y = 36;
+        labels.push_back ({ "GUI colour", { x0, y, 200, 16 } });
+        y += 18;
+        for (size_t i = 0; i < accentSw.size(); ++i) accentSw[i]->setBounds (x0 + (int) i * 32, y, 28, 28);
+        customSw.setBounds (x0 + (int) accentSw.size() * 32, y, 28, 28);
+        y += 38;
+        labels.push_back ({ "Background", { x0, y, 200, 16 } });
+        y += 18;
+        for (size_t i = 0; i < themeSw.size(); ++i) themeSw[i]->setBounds (x0 + (int) i * 32, y, 28, 28);
+        y += 38;
+        labels.push_back ({ "GUI size", { x0, y, 200, 16 } });
+        y += 18;
+        scaleSlider.setBounds (x0, y, getWidth() - 2 * x0, 24);
+        y += 38;
+        labels.push_back ({ "Display & processing", { x0, y, 200, 16 } });
+        y += 20;
+        analyzerBtn.setBounds (x0, y, 92, 24);
+        notesBtn.setBounds (x0 + 98, y, 100, 24);
+        invertBtn.setBounds (x0 + 204, y, 100, 24);
+        y += 34;
+        const int bx = 130, bw = getWidth() - bx - x0;
+        labels.push_back ({ "Analyzer view", { x0, y, 110, 24 } });
+        anaViewBox.setBounds (bx, y, bw, 24);
+        y += 30;
+        labels.push_back ({ "Display range", { x0, y, 110, 24 } });
+        rangeBox.setBounds (bx, y, bw, 24);
+        y += 30;
+        labels.push_back ({ "Character", { x0, y, 110, 24 } });
+        charBox.setBounds (bx, y, bw, 24);
+    }
+
+private:
+    using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
+
+    void refreshSelection()
+    {
+        for (size_t i = 0; i < accentSw.size(); ++i) { accentSw[i]->selected = ! Look::prefs.useCustom && Look::prefs.accent == (int) i; accentSw[i]->repaint(); }
+        customSw.selected = Look::prefs.useCustom;
+        customSw.repaint();
+        for (size_t i = 0; i < themeSw.size(); ++i) { themeSw[i]->selected = Look::prefs.theme == (int) i; themeSw[i]->repaint(); }
+    }
+
+    void changed()
+    {
+        Look::prefs.save();
+        Look::prefs.apply();
+        refreshSelection();
+        if (onLook) onLook();
+    }
+
+    void applyScale()
+    {
+        const float s = (float) scaleSlider.getValue() / 100.0f;
+        if (std::abs (s - Look::prefs.scale) < 0.001f) return;
+        const float old = Look::prefs.scale;
+        Look::prefs.scale = s;
+        Look::prefs.save();
+        if (onScale) onScale (old);
+    }
+
+    void pickCustom()
+    {
+        const auto start = Look::prefs.useCustom ? juce::Colour (Look::prefs.custom) : juce::Colour (Look::accents[Look::prefs.accent].argb);
+        juce::Component::SafePointer<SettingsPanel> safe (this);
+        auto picker = std::make_unique<AccentPicker> (start, [safe] (juce::Colour c)
+        {
+            if (safe == nullptr) return;
+            Look::prefs.useCustom = true;
+            Look::prefs.custom = c.getARGB();
+            safe->changed();
+        });
+        juce::CallOutBox::launchAsynchronously (std::move (picker), host.getLocalArea (&customSw, customSw.getLocalBounds()), &host);
+    }
+
+    RajvikEQAudioProcessor& proc;
+    juce::Component& host;
+    std::function<void()> onLook;
+    std::function<void (float)> onScale;
+    std::vector<std::unique_ptr<Swatch>> accentSw, themeSw;
+    Swatch customSw;
+    juce::Slider scaleSlider;
+    juce::ComboBox charBox, rangeBox, anaViewBox;
+    juce::ToggleButton analyzerBtn { "Analyzer" }, notesBtn { "Piano view" }, invertBtn { "Phase invert" };
+    std::unique_ptr<CA> charA, rangeA, anaViewA;
+    std::unique_ptr<BA> analyzerA, notesA, invertA;
+    std::vector<std::pair<juce::String, juce::Rectangle<int>>> labels;
+};
+}
+
+//==============================================================================
 RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcessor& p)
     : juce::AudioProcessorEditor (&p), proc (p), display (p), strip (p), panel (p)
 {
+    Look::prefs.load();
+    Look::prefs.apply();
+    laf.refreshColours();
     setLookAndFeel (&laf);
 
-    addAndMakeVisible (display);
-    addAndMakeVisible (strip);
-    for (auto* c : { &modeBox, &charBox, &rangeBox }) addAndMakeVisible (c);
-    addAndMakeVisible (panel);
+    root.paintFn = [this] (juce::Graphics& g) { paintRoot (g); };
+    root.resizedFn = [this] { layoutRoot(); };
+    addAndMakeVisible (root);
+
+    for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
+                                                             &toolsBtn, &gearBtn, &analyzerBtn, &outL, &outSlider })
+        root.addAndMakeVisible (c);
+    root.addAndMakeVisible (panel);
+
     display.onSelect = [this] (int b) { panelOpen = true; panel.select (b); };
     display.onBackgroundClick = [this] { panelOpen = false; };
     panel.onClose = [this] { panelOpen = false; };
@@ -1225,79 +1449,47 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     };
 
     modeBox.addItemList (modeNames, 1);
-    charBox.addItemList (charNames, 1);
-    rangeBox.addItemList (rangeNames, 1);
-    for (auto* l : { &charL, &outL })
-    {
-        l->setJustificationType (juce::Justification::centredRight);
-        l->setFont (juce::Font (juce::FontOptions (13.0f)));
-        addAndMakeVisible (l);
-    }
-    charL.setText ("Character", juce::dontSendNotification);
+    outL.setJustificationType (juce::Justification::centredRight);
+    outL.setFont (juce::Font (juce::FontOptions (13.0f)));
     outL.setText ("Output", juce::dontSendNotification);
-    for (auto* b : { &presetBtn, &presetPrev, &presetNext, &presetSave }) addAndMakeVisible (b);
+
     presetBtn.onClick = [this] { showPresetMenu(); };
     presetPrev.onClick = [this] { stepPreset (-1); };
     presetNext.onClick = [this] { stepPreset (1); };
     presetSave.onClick = [this] { promptSave(); };
     presetSave.setTooltip ("Save the current bands as your own preset");
-    addAndMakeVisible (analyzerBtn);
-    addAndMakeVisible (anaViewBox);
-    addAndMakeVisible (peaksBtn);
-    anaViewBox.addItemList (anaViewNames, 1);
-    anaViewBox.setTooltip ("Which spectrum to show: input (Pre), output (Post) or both");
-    peaksBtn.setTooltip ("Play your audio: the loudest peaks are found, given a bell each and selected so you can EQ them together");
-    peaksBtn.onClick = [this] { display.startPeakSearch(); };
-    addAndMakeVisible (invertBtn);
-    addAndMakeVisible (notesBtn);
+
+    toolsBtn.setButtonText ("Tools " + juce::String (juce::CharPointer_UTF8 ("\xe2\x96\xbe")));
+    toolsBtn.setTooltip ("EQ Sketch, Auto Peaks, Instances, EQ Match");
+    toolsBtn.onClick = [this] { showToolsMenu(); };
+    gearBtn.onClick = [this] { showSettings(); };
+
     outSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     outSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 20);
     outSlider.setDoubleClickReturnValue (true, 0.0);
-    addAndMakeVisible (outSlider);
 
     modeA     = std::make_unique<CA> (p.apvts, "mode", modeBox);
-    charA     = std::make_unique<CA> (p.apvts, "character", charBox);
-    rangeA    = std::make_unique<CA> (p.apvts, "disp_range", rangeBox);
     analyzerA = std::make_unique<BA> (p.apvts, "analyzer", analyzerBtn);
-    anaViewA  = std::make_unique<CA> (p.apvts, "ana_view", anaViewBox);
-    invertA   = std::make_unique<BA> (p.apvts, "invert", invertBtn);
-    notesA    = std::make_unique<BA> (p.apvts, "notes", notesBtn);
     outA      = std::make_unique<SA> (p.apvts, "out_gain", outSlider);
 
-    for (auto* b : { &sketchBtn, &instBtn, &refBtn, &srcBtn, &applyBtn }) addAndMakeVisible (b);
-    sketchBtn.setClickingTogglesState (true);
-    refBtn.setClickingTogglesState (true);
-    srcBtn.setClickingTogglesState (true);
-    sketchBtn.onClick = [this] { display.sketchMode = sketchBtn.getToggleState(); display.repaint(); };
-    display.onSketchDone = [this] { sketchBtn.setToggleState (false, juce::dontSendNotification); };
-    instBtn.onClick = [this] { display.showInstances(); };
-    refBtn.onClick = [this]
-    {
-        if (refBtn.getToggleState()) srcBtn.setToggleState (false, juce::dontSendNotification);
-        display.setCapture (refBtn.getToggleState() ? 1 : 0);
-    };
-    srcBtn.onClick = [this]
-    {
-        if (srcBtn.getToggleState()) refBtn.setToggleState (false, juce::dontSendNotification);
-        display.setCapture (srcBtn.getToggleState() ? 2 : 0);
-    };
-    applyBtn.onClick = [this]
-    {
-        refBtn.setToggleState (false, juce::dontSendNotification);
-        srcBtn.setToggleState (false, juce::dontSendNotification);
-        display.setCapture (0);
-        display.applyMatch();
-    };
+    display.onSketchDone = [this] { display.repaint(); };
 
+    // window: freely resizable, from a small minimum up; "GUI size" in the settings scales everything
+    const float s = Look::prefs.scale;
     setResizable (true, true);
-    setResizeLimits (1160, 560, 1900, 1100);
-    setSize (1200, 680);
+    setResizeLimits (juce::roundToInt ((float) minW * s), juce::roundToInt ((float) minH * s),
+                     juce::roundToInt ((float) maxW * s), juce::roundToInt ((float) maxH * s));
+    setSize (juce::roundToInt ((float) Look::prefs.width * s), juce::roundToInt ((float) Look::prefs.height * s));
     startTimerHz (30);
 }
 
 RajvikEQAudioProcessorEditor::~RajvikEQAudioProcessorEditor()
 {
     stopTimer();
+    const float s = Look::prefs.scale;
+    Look::prefs.width  = juce::jlimit (minW, maxW, juce::roundToInt ((float) getWidth() / s));
+    Look::prefs.height = juce::jlimit (minH, maxH, juce::roundToInt ((float) getHeight() / s));
+    Look::prefs.save();
     setLookAndFeel (nullptr);
 }
 
@@ -1306,8 +1498,59 @@ void RajvikEQAudioProcessorEditor::timerCallback()
     placePanel();
     const auto nm = Presets::presetName (proc);
     if (presetBtn.getButtonText() != nm) presetBtn.setButtonText (nm);
-    const auto pt = display.isListeningForPeaks() ? juce::String ("Listening...") : juce::String ("Auto Peaks");
-    if (peaksBtn.getButtonText() != pt) peaksBtn.setButtonText (pt);
+}
+
+void RajvikEQAudioProcessorEditor::applyLook()
+{
+    laf.refreshColours();
+    sendLookAndFeelChange();
+    repaint();
+}
+
+void RajvikEQAudioProcessorEditor::scaleChanged (float oldScale)
+{
+    const float s = Look::prefs.scale;
+    const float lw = (float) getWidth() / oldScale, lh = (float) getHeight() / oldScale;   // keep the same unscaled layout size
+    setResizeLimits (juce::roundToInt ((float) minW * s), juce::roundToInt ((float) minH * s),
+                     juce::roundToInt ((float) maxW * s), juce::roundToInt ((float) maxH * s));
+    setSize (juce::roundToInt (lw * s), juce::roundToInt (lh * s));
+    resized();
+}
+
+void RajvikEQAudioProcessorEditor::showSettings()
+{
+    juce::Component::SafePointer<RajvikEQAudioProcessorEditor> safe (this);
+    auto content = std::make_unique<SettingsPanel> (proc, root,
+        [safe] { if (safe != nullptr) safe->applyLook(); },
+        [safe] (float old) { if (safe != nullptr) safe->scaleChanged (old); });
+    juce::CallOutBox::launchAsynchronously (std::move (content), root.getLocalArea (&gearBtn, gearBtn.getLocalBounds()), &root);
+}
+
+void RajvikEQAudioProcessorEditor::showToolsMenu()
+{
+    const int cap = display.getCapture();
+    juce::PopupMenu m, mm;
+    m.addItem (1, "EQ Sketch (draw a curve)", true, display.sketchMode);
+    m.addItem (2, display.isListeningForPeaks() ? "Auto Peaks: listening... (click to cancel)" : "Auto Peaks (find the loudest peaks)");
+    m.addItem (3, "Instances (compare with other EQs)");
+    m.addSeparator();
+    mm.addItem (10, "1. Capture reference (play the reference)", true, cap == 1);
+    mm.addItem (11, "2. Capture source (play your track)", true, cap == 2);
+    mm.addItem (12, "3. Apply match");
+    m.addSubMenu ("EQ Match", mm);
+
+    juce::Component::SafePointer<RajvikEQAudioProcessorEditor> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&toolsBtn), [safe] (int r)
+    {
+        if (safe == nullptr || r <= 0) return;
+        auto& d = safe->display;
+        if (r == 1) { d.sketchMode = ! d.sketchMode; d.repaint(); }
+        else if (r == 2) d.startPeakSearch();
+        else if (r == 3) d.showInstances();
+        else if (r == 10) d.setCapture (d.getCapture() == 1 ? 0 : 1);
+        else if (r == 11) d.setCapture (d.getCapture() == 2 ? 0 : 2);
+        else if (r == 12) { d.setCapture (0); d.applyMatch(); }
+    });
 }
 
 //==============================================================================
@@ -1404,27 +1647,30 @@ void RajvikEQAudioProcessorEditor::placePanel()
     panel.setBounds (x, panelOnTop ? yTop : yBottom, pw, ph);
 }
 
+
 void RajvikEQAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    const int w = getWidth(), h = getHeight();
+    g.fillAll (Look::bgBot);
+}
+
+void RajvikEQAudioProcessorEditor::paintRoot (juce::Graphics& g)
+{
+    const int w = root.getWidth(), h = root.getHeight();
     g.setGradientFill (juce::ColourGradient (Look::bgTop, 0.0f, 0.0f, Look::bgBot, 0.0f, (float) h, false));
     g.fillAll();
 
-    // header
+    // slim header
     g.setColour (juce::Colours::white.withAlpha (0.03f));
     g.fillRect (0, 0, w, headerH);
     g.setColour (juce::Colours::black.withAlpha (0.4f));
     g.drawHorizontalLine (headerH - 1, 0.0f, (float) w);
 
     juce::AttributedString as;
-    as.append ("RAJVIK ", juce::Font (juce::FontOptions (24.0f, juce::Font::bold)), Look::text);
-    as.append ("Pro EQ", juce::Font (juce::FontOptions (24.0f, juce::Font::bold)), Look::gold);
-    as.draw (g, juce::Rectangle<float> (18.0f, 6.0f, 220.0f, 36.0f));
-    g.setColour (Look::muted);
-    g.setFont (juce::Font (juce::FontOptions (11.5f)));
-    g.drawText ("24-band dynamic equalizer", 20, 38, 220, 14, juce::Justification::left);
+    as.append ("RAJVIK ", juce::Font (juce::FontOptions (17.0f, juce::Font::bold)), Look::text);
+    as.append ("Pro EQ", juce::Font (juce::FontOptions (17.0f, juce::Font::bold)), Look::gold);
+    as.draw (g, juce::Rectangle<float> (12.0f, 6.0f, 130.0f, 24.0f));
 
-    // bottom bar
+    // slim bottom bar
     const int bt = h - bottomH;
     g.setColour (Look::bar.withAlpha (0.92f));
     g.fillRect (0, bt, w, bottomH);
@@ -1434,34 +1680,32 @@ void RajvikEQAudioProcessorEditor::paint (juce::Graphics& g)
 
 void RajvikEQAudioProcessorEditor::resized()
 {
-    auto r = getLocalBounds();
+    const float s = Look::prefs.scale;
+    root.setTransform (juce::AffineTransform::scale (s));
+    root.setBounds (0, 0, juce::roundToInt ((float) getWidth() / s), juce::roundToInt ((float) getHeight() / s));
+    layoutRoot();
+}
 
-    presetPrev.setBounds (232, 15, 24, 26);
-    presetBtn.setBounds (260, 15, 150, 26);
-    presetNext.setBounds (414, 15, 24, 26);
-    presetSave.setBounds (444, 15, 54, 26);
-    auto hdr = r.removeFromTop (headerH).reduced (14, 13);
-    applyBtn.setBounds (hdr.removeFromRight (100));   hdr.removeFromRight (6);
-    srcBtn.setBounds   (hdr.removeFromRight (116));   hdr.removeFromRight (6);
-    refBtn.setBounds   (hdr.removeFromRight (130));   hdr.removeFromRight (18);
-    instBtn.setBounds  (hdr.removeFromRight (92));    hdr.removeFromRight (6);
-    sketchBtn.setBounds (hdr.removeFromRight (92));
+void RajvikEQAudioProcessorEditor::layoutRoot()
+{
+    auto r = root.getLocalBounds();
 
-    auto bot = r.removeFromBottom (bottomH).reduced (14, 7);
-    modeBox.setBounds (bot.removeFromLeft (140));     bot.removeFromLeft (14);
-    charL.setBounds   (bot.removeFromLeft (70));      bot.removeFromLeft (4);
-    charBox.setBounds (bot.removeFromLeft (90));      bot.removeFromLeft (18);
+    presetPrev.setBounds (138, 5, 22, 24);
+    presetBtn.setBounds  (162, 5, 150, 24);
+    presetNext.setBounds (314, 5, 22, 24);
+    presetSave.setBounds (340, 5, 48, 24);
+    auto hdr = r.removeFromTop (headerH);
+    gearBtn.setBounds  (hdr.getRight() - 38, 4, 30, 26);
+    toolsBtn.setBounds (hdr.getRight() - 38 - 6 - 78, 5, 78, 24);
+
+    auto bot = r.removeFromBottom (bottomH).reduced (8, 2);
+    modeBox.setBounds (bot.removeFromLeft (130));  bot.removeFromLeft (10);
     analyzerBtn.setBounds (bot.removeFromLeft (96));
-    anaViewBox.setBounds  (bot.removeFromLeft (100)); bot.removeFromLeft (10);
-    invertBtn.setBounds   (bot.removeFromLeft (120));
-    notesBtn.setBounds    (bot.removeFromLeft (80));   bot.removeFromLeft (6);
-    peaksBtn.setBounds    (bot.removeFromLeft (100));
-    outSlider.setBounds (bot.removeFromRight (250));
-    outL.setBounds (bot.removeFromRight (56));
+    outSlider.setBounds (bot.removeFromRight (230));
+    outL.setBounds (bot.removeFromRight (52));
 
     auto stripArea = r.removeFromRight (stripW);
     display.setBounds (r);
     strip.setBounds (stripArea);
-    rangeBox.setBounds (stripArea.getX() + 8, stripArea.getY() + 4, 68, 22);
     placePanel();
 }
