@@ -48,3 +48,10 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - EQ Sketch/Match are approximations (up to 8 / 10 bell bands) - edit the bands afterwards.
 - Instance list works for instances in the same process (normal in most DAWs); track names show if the host provides them.
 - Compiled and tested headless on Linux (all three band modes, mono fallback, Natural and Linear Phase); the Windows/macOS GitHub build is still the final check.
+
+## UI update: slim bars, settings, resizing
+- **Slim layout:** header is 34 px (logo, preset `< name > Save`, **Tools** menu, **gear**), bottom bar is 26 px (processing mode, Analyzer toggle, Output).
+- **Tools menu:** EQ Sketch, Auto Peaks, Instances, EQ Match (capture reference / capture source / apply).
+- **Gear (settings):** GUI colour (8 presets + custom colour picker), background theme (5), **GUI size 60 - 150 %**, and the moved options: Analyzer, Piano view, Phase invert, Analyzer view, Display range, Character. Settings are saved in `<user app data>/RajvikEQ/settings.xml` (shared by all instances).
+- **Resizing:** drag the window corner freely (minimum is 1000 x 520 at 100 %); use GUI size below 100 % to make the whole plugin smaller on screen (e.g. 60 % = 600 x 312 minimum).
+- **Spectral dynamics follow Q:** a Spectral band only reacts inside its own width (f0 / Q, exactly the shaded region on the display). Higher Q = narrower, lower Q = wider; bins far from the band are untouched.
