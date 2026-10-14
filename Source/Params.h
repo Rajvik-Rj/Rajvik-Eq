@@ -15,6 +15,7 @@ inline const juce::StringArray placementNames { "Stereo", "Left", "Right", "Mid"
 inline const juce::StringArray dirNames       { "Above", "Below" };
 inline const juce::StringArray modeNames      { "Zero Latency", "Natural Phase", "Linear Phase" };
 inline const juce::StringArray charNames      { "Clean", "Subtle", "Warm" };
+inline const juce::StringArray anaViewNames   { "Pre", "Post", "Pre + Post" };
 inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "30 dB" };
 
 // "A4 +12c" style note name for a frequency (A4 = 440 Hz)
@@ -101,6 +102,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         layout.add (mk (pid (b, "att"), n + "Attack", ar, 20.0f, fmt ("ms", 1, false), parse()));
         layout.add (mk (pid (b, "rel"), n + "Release", rr, 150.0f, fmt ("ms", 0, false), parse()));
         layout.add (std::make_unique<AudioParameterChoice> (ParameterID { pid (b, "dir"), 1 },   n + "Dynamic Direction", dirNames, 0));
+        layout.add (std::make_unique<AudioParameterBool>   (ParameterID { pid (b, "sc"), 1 },    n + "Sidechain", false));
     }
 
     layout.add (mk ("out_gain", "Output Gain", NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, fmt ("dB", 1, true), parse()));
@@ -108,6 +110,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "character", 1 },  "Character", charNames, 0));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "disp_range", 1 }, "Display Range", rangeNames, 2));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "analyzer", 1 },   "Analyzer", true));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_view", 1 },   "Analyzer View", anaViewNames, 2));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "invert", 1 },     "Phase Invert", false));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "notes", 1 },      "Piano View", false));
     return layout;

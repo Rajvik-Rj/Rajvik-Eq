@@ -14,6 +14,8 @@ public:
     bool sketchMode = false;
     void setCapture (int mode) { capMode = mode; }
     void applyMatch();
+    void startPeakSearch() { peakListen = peakListen > 0 ? 0 : 75; peakAcc.fill (0.0); peakN = 0; }
+    bool isListeningForPeaks() const { return peakListen > 0; }
     void showInstances();
     bool isBandEnabled (int b) const { return apvtsVal (RP::pid (b, "en")) > 0.5f; }
     juce::Point<float> getNodePos (int b) const { return nodePos (b); }
@@ -26,6 +28,11 @@ public:
     void mouseExit (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    bool keyPressed (const juce::KeyPress&) override;
+
+    // multi selection (marquee / shift-click / Ctrl+A): bands move, change and delete together
+    std::vector<int> groupBands() const;
+    std::array<bool, RP::numBands> selSet {};
 
 private:
     float val (const juce::String& id) const { return apvtsVal (id); }
@@ -44,10 +51,22 @@ private:
     float dispRange() const;
     void timerCallback() override;
     void updateSpectrum (const Analyzer&, std::array<float, 2049>&);
-    void drawSpectrum (juce::Graphics&, const std::array<float, 2049>&, juce::Colour, float alpha);
+    void drawSpectrum (juce::Graphics&, const std::array<float, 2049>&, juce::Colour, float alpha, bool filled);
+    float spectrumDbAt (const std::array<float, 2049>&, float x) const;
 
     RajvikEQAudioProcessor& proc;
-    bool dragging = false;
+    bool dragging = false, marqueeing = false;
+    juce::Point<float> mqStart, dragDown;
+    juce::Rectangle<float> mqRect;
+    std::vector<int> dragGroup;
+    std::array<float, RP::numBands> dragF {}, dragG {};
+    int pendingSingle = -1;
+    int peakListen = 0, peakN = 0;
+    std::array<double, 2049> peakAcc {};
+    void finishPeakSearch();
+    void toggleSel (int b);
+    void finishMarquee (bool additive);
+    int kindOf (int b) const;
     float hoverX = -1.0f, hoverY = -1.0f;
     int capMode = 0, refN = 0, srcN = 0;
     std::array<double, 2049> refAcc {}, srcAcc {};
@@ -113,7 +132,7 @@ private:
     int lastMode = -1;
     bool lastCut = false, lastCanDyn = true;
     juce::Label numLabel;
-    juce::ToggleButton enBtn;
+    juce::ToggleButton enBtn, scBtn { "Sidechain" };
     juce::TextButton closeBtn, prevBtn, nextBtn;
     juce::ComboBox typeBox, slopeBox, placeBox, dirBox, dynModeBox;
     Knob freq, gain, q, thr, range, att, rel;
@@ -123,7 +142,7 @@ private:
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::unique_ptr<SA> freqA, gainA, qA, thrA, rangeA, attA, relA;
     std::unique_ptr<CA> typeA, slopeA, placeA, dirA;
-    std::unique_ptr<BA> enA;
+    std::unique_ptr<BA> enA, scA;
 };
 
 class RajvikEQAudioProcessorEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -137,6 +156,9 @@ public:
 private:
     void timerCallback() override;
     void placePanel();
+    void showPresetMenu();
+    void stepPreset (int dir);
+    void promptSave();
 
     static constexpr int headerH = 56, bottomH = 40, stripW = 100;
     RajvikEQAudioProcessor& proc;
@@ -146,8 +168,10 @@ private:
     BandPanel panel;
     bool panelOnTop = false, panelOpen = false;
 
-    juce::ComboBox modeBox, charBox, rangeBox;
+    juce::ComboBox modeBox, charBox, rangeBox, anaViewBox;
+    juce::TextButton peaksBtn { "Auto Peaks" };
     juce::Label charL, outL;
+    juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" };
     juce::ToggleButton analyzerBtn { "Analyzer" }, invertBtn { "Phase Invert" }, notesBtn { "Piano" };
     juce::Slider outSlider;
     juce::TextButton sketchBtn { "EQ Sketch" }, instBtn { "Instances" }, refBtn { "Match: Reference" }, srcBtn { "Match: Source" }, applyBtn { "Match: Apply" };
@@ -155,7 +179,7 @@ private:
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<CA> modeA, charA, rangeA;
+    std::unique_ptr<CA> modeA, charA, rangeA, anaViewA;
     std::unique_ptr<BA> analyzerA, invertA, notesA;
     std::unique_ptr<SA> outA;
 

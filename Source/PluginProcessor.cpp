@@ -42,6 +42,7 @@ void RajvikEQAudioProcessor::updateTrackProperties (const TrackProperties& p)
 
 RajvikEQAudioProcessor::RajvikEQAudioProcessor()
     : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                       .withInput ("Sidechain", juce::AudioChannelSet::stereo(), false)
                                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", createLayout())
 {
@@ -50,7 +51,7 @@ RajvikEQAudioProcessor::RajvikEQAudioProcessor()
     {
         auto g = [this, b] (const char* n) { return apvts.getRawParameterValue (pid (b, n)); };
         ptrs[(size_t) b] = { g ("en"), g ("type"), g ("freq"), g ("gain"), g ("q"), g ("slope"), g ("place"),
-                             g ("dyn"), g ("spec"), g ("thr"), g ("range"), g ("att"), g ("rel"), g ("dir") };
+                             g ("dyn"), g ("spec"), g ("thr"), g ("range"), g ("att"), g ("rel"), g ("dir"), g ("sc") };
     }
     for (auto* p : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
@@ -71,7 +72,13 @@ RajvikEQAudioProcessor::~RajvikEQAudioProcessor()
 bool RajvikEQAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 {
     const auto in = l.getMainInputChannelSet();
-    return in == l.getMainOutputChannelSet() && ! in.isDisabled() && in.size() >= 1 && in.size() <= 16;
+    if (in != l.getMainOutputChannelSet() || in.isDisabled() || in.size() < 1 || in.size() > 16) return false;
+    if (l.inputBuses.size() > 1)   // optional sidechain input: mono or stereo
+    {
+        const auto sc = l.inputBuses.getReference (1);
+        if (! sc.isDisabled() && sc.size() > 2) return false;
+    }
+    return true;
 }
 
 void RajvikEQAudioProcessor::prepareToPlay (double sr, int block)
@@ -91,7 +98,7 @@ RajvikEQAudioProcessor::BandVals RajvikEQAudioProcessor::readBand (int b) const
 {
     const auto& p = ptrs[(size_t) b];
     BandVals v;
-    v.en = p.en->load() > 0.5f;   v.dyn = p.dyn->load() > 0.5f;   v.spec = p.spec->load() > 0.5f;
+    v.en = p.en->load() > 0.5f;   v.dyn = p.dyn->load() > 0.5f;   v.spec = p.spec->load() > 0.5f;   v.sc = p.sc->load() > 0.5f;
     v.type = (int) p.type->load(); v.slope = (int) p.slope->load(); v.place = (int) p.place->load(); v.dir = (int) p.dir->load();
     v.freq = p.freq->load(); v.gain = p.gain->load(); v.q = p.q->load(); v.thr = p.thr->load();
     v.range = p.range->load(); v.att = p.att->load(); v.rel = p.rel->load();
@@ -143,6 +150,7 @@ void RajvikEQAudioProcessor::rebuildIR()
         {
             const auto v = readBand (b);
             if (! v.en) continue;
+            if (modeOf (v) == ModeSpectral) continue;   // spectral bands never act as a static filter
             if (modeOf (v) == ModeDynamic || v.place == Mid || v.place == Side) continue;   // handled by the hybrid path
             const bool affects = v.place == Stereo || (ch == 0 && v.place == Left) || (ch == 1 && v.place == Right);
             if (! affects) continue;
@@ -184,15 +192,16 @@ void RajvikEQAudioProcessor::ensureDesign (BandState& s, const BandVals& v, doub
     }
 }
 
-void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool linear, double fs)
+void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool linear, double fs, const float* scL, const float* scR)
 {
     constexpr int sub = 32;
 
     for (int b = 0; b < numBands; ++b)
     {
-        const auto v = readBand (b);
+        auto v = readBand (b);
         auto& s = bands[(size_t) b];
         dynDb[(size_t) b].store (0.0f);
+        if (modeOf (v) == ModeSpectral) v.gain = 0.0f;   // a Spectral band carries no static EQ gain: it only does spectral processing
 
         // In linear phase mode the FIR handles static Stereo/Left/Right bands; dynamic and Mid/Side
         // bands run here in the zero-latency path, after the FIR.
@@ -200,7 +209,7 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         const int kind = modeOf (v);
         const bool dynamic = kind == ModeDynamic || (kind == ModeSpectral && nCh != 2);
         const bool hybrid = dynamic || v.place == Mid || v.place == Side;
-        if (! v.en || (linear && ! hybrid)) { s.wasOn = false; continue; }
+        if (! v.en || (kind == ModeSpectral && nCh == 2) || (linear && ! hybrid)) { s.wasOn = false; continue; }   // stereo Spectral bands live in the STFT stage only
         if (! s.wasOn) { s.reset(); s.wasOn = true; }
 
         if (! dynamic) s.appliedDyn = 0.0;
@@ -224,17 +233,17 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
             {
                 for (int i = 0; i < len; ++i)
                 {
-                    double in = (double) chs[0][start + i];
-                    if (nCh > 1)
+                    // detector input: the main signal, or the sidechain input when this band uses it (silence if none is connected)
+                    const float* d0 = v.sc ? scL : chs[0];
+                    const float* d1 = v.sc ? scR : (nCh > 1 ? chs[1] : chs[0]);
+                    const double l = d0 != nullptr ? (double) d0[start + i] : 0.0, r = d1 != nullptr ? (double) d1[start + i] : 0.0;
+                    double in;
+                    switch (v.place)
                     {
-                        const double l = (double) chs[0][start + i], r = (double) chs[1][start + i];
-                        switch (v.place)
-                        {
-                            case Left:  in = l; break;
-                            case Right: in = r; break;
-                            case Side:  in = 0.5 * (l - r); break;
-                            default:    in = 0.5 * (l + r); break;   // Stereo / Mid
-                        }
+                        case Left:  in = l; break;
+                        case Right: in = r; break;
+                        case Side:  in = 0.5 * (l - r); break;
+                        default:    in = 0.5 * (l + r); break;   // Stereo / Mid
                     }
                     const double a = std::abs (s.det.process (in));
                     s.env = a + (a > s.env ? ac : rc) * (s.env - a);
@@ -294,8 +303,21 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 {
     juce::ScopedNoDenormals noDenormals;
     const int n = buffer.getNumSamples();
-    const int nCh = juce::jmin (buffer.getNumChannels(), 16);
+    const int nCh = juce::jmin (buffer.getNumChannels(), getMainBusNumInputChannels(), 16);   // main bus only (the sidechain channels follow it)
     if (nCh < 1 || n == 0) return;
+
+    const float* scL = nullptr;
+    const float* scR = nullptr;
+    if (auto* sb = getBus (true, 1))
+        if (sb->isEnabled() && sb->getNumberOfChannels() > 0)
+        {
+            const int idx = getChannelIndexInProcessBlockBuffer (true, 1, 0);
+            if (idx >= 0 && idx < buffer.getNumChannels())
+            {
+                scL = buffer.getReadPointer (idx);
+                scR = (sb->getNumberOfChannels() > 1 && idx + 1 < buffer.getNumChannels()) ? buffer.getReadPointer (idx + 1) : scL;
+            }
+        }
     float* chs[16];
     for (int c = 0; c < nCh; ++c) chs[c] = buffer.getWritePointer (c);
     float* L = chs[0];
@@ -328,12 +350,31 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         auto sub = block.getSubsetChannelBlock (0, 2);
         auto up = os.processSamplesUp (sub);
         float* upCh[2] = { up.getChannelPointer (0), up.getChannelPointer (1) };
-        runBands (upCh, 2, (int) up.getNumSamples(), false, fs * 2.0);
+        const int upN = (int) up.getNumSamples();
+        const float* upL = nullptr;
+        const float* upR = nullptr;
+        if (scL != nullptr)   // sidechain to the 2x rate (linear interpolation)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                if ((int) scUp[ch].size() < upN) scUp[ch].resize ((size_t) upN);
+                const float* src = ch == 0 ? scL : scR;
+                for (int i = 0; i < n; ++i)
+                {
+                    const float cur = src[i];
+                    scUp[ch][(size_t) (2 * i)] = 0.5f * (scPrev[ch] + cur);
+                    scUp[ch][(size_t) (2 * i + 1)] = cur;
+                    scPrev[ch] = cur;
+                }
+            }
+            upL = scUp[0].data(); upR = scUp[1].data();
+        }
+        runBands (upCh, 2, upN, false, fs * 2.0, upL, upR);
         os.processSamplesDown (sub);
     }
     else
     {
-        runBands (chs, nCh, n, linear, fs);
+        runBands (chs, nCh, n, linear, fs, scL, scR);
     }
 
     if (spectral)
@@ -344,10 +385,10 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const auto v = readBand (b);
             auto& c = cfg[(size_t) b];
             c.active = v.en && modeOf (v) == ModeSpectral;
-            c.above = v.dir == 0; c.freq = v.freq; c.q = v.q; c.thr = v.thr; c.range = v.range; c.att = v.att; c.rel = v.rel;
+            c.sc = v.sc; c.above = v.dir == 0; c.freq = v.freq; c.q = v.q; c.thr = v.thr; c.range = v.range; c.att = v.att; c.rel = v.rel;
         }
         spec.setBands (cfg);
-        spec.process (L, R, n);
+        spec.process (L, R, scL, scR, n);
         for (int b = 0; b < numBands; ++b)
             if (cfg[(size_t) b].active) dynDb[(size_t) b].store (spec.dynAt[(size_t) b]);
     }

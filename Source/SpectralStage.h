@@ -14,7 +14,7 @@ public:
 
     struct BandCfg
     {
-        bool active = false, above = true;
+        bool active = false, above = true, sc = false;
         float freq = 1000.f, q = 1.f, thr = -24.f, range = -6.f, att = 20.f, rel = 150.f;
     };
 
@@ -35,7 +35,7 @@ public:
 
     void reset()
     {
-        for (int ch = 0; ch < 2; ++ch) { inBuf[(size_t) ch].fill (0.0f); outBuf[(size_t) ch].fill (0.0f); }
+        for (int ch = 0; ch < 2; ++ch) { inBuf[(size_t) ch].fill (0.0f); inSc[(size_t) ch].fill (0.0f); outBuf[(size_t) ch].fill (0.0f); }
         for (auto& e : env) e.fill (-120.0f);
         pos = 0; hopCount = 0;
         mask.fill (0.0f);
@@ -70,12 +70,15 @@ public:
         }
     }
 
-    void process (float* l, float* r, int n)
+    // scL / scR: optional sidechain input (nullptr = silence). Bands with cfg.sc detect on it instead of the main signal.
+    void process (float* l, float* r, const float* scL, const float* scR, int n)
     {
         for (int i = 0; i < n; ++i)
         {
             inBuf[0][(size_t) pos] = l[i];
             inBuf[1][(size_t) pos] = r[i];
+            inSc[0][(size_t) pos] = scL != nullptr ? scL[i] : 0.0f;
+            inSc[1][(size_t) pos] = scR != nullptr ? scR[i] : 0.0f;
             l[i] = outBuf[0][(size_t) pos];
             r[i] = outBuf[1][(size_t) pos];
             outBuf[0][(size_t) pos] = 0.0f;
@@ -101,11 +104,30 @@ private:
         }
 
         const float norm = 1.0f / ((float) N * 0.3183f);   // 0 dBFS sine -> 0 dB
-        for (int k = 0; k < bins; ++k)
+        auto levels = [norm] (const std::array<std::array<float, 2 * N>, 2>& f, std::array<float, bins>& out)
         {
-            const float l2 = fr[0][(size_t) (2 * k)] * fr[0][(size_t) (2 * k)] + fr[0][(size_t) (2 * k + 1)] * fr[0][(size_t) (2 * k + 1)];
-            const float r2 = fr[1][(size_t) (2 * k)] * fr[1][(size_t) (2 * k)] + fr[1][(size_t) (2 * k + 1)] * fr[1][(size_t) (2 * k + 1)];
-            lvl[(size_t) k] = 20.0f * std::log10 (std::sqrt (0.5f * (l2 + r2)) * norm + 1e-9f);
+            for (int k = 0; k < bins; ++k)
+            {
+                const float l2 = f[0][(size_t) (2 * k)] * f[0][(size_t) (2 * k)] + f[0][(size_t) (2 * k + 1)] * f[0][(size_t) (2 * k + 1)];
+                const float r2 = f[1][(size_t) (2 * k)] * f[1][(size_t) (2 * k)] + f[1][(size_t) (2 * k + 1)] * f[1][(size_t) (2 * k + 1)];
+                out[(size_t) k] = 20.0f * std::log10 (std::sqrt (0.5f * (l2 + r2)) * norm + 1e-9f);
+            }
+        };
+        levels (fr, lvl);
+
+        bool anySc = false;
+        for (const auto& bc : cfg) if (bc.active && bc.sc) anySc = true;
+        if (anySc)   // spectrum of the sidechain input, only computed when a band needs it
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto& f = frSc[(size_t) ch];
+                for (int i = 0; i < N; ++i)
+                    f[(size_t) i] = inSc[(size_t) ch][(size_t) ((pos + i) & (N - 1))] * win[(size_t) i];
+                std::fill (f.begin() + N, f.end(), 0.0f);
+                fft.performRealOnlyForwardTransform (f.data(), true);
+            }
+            levels (frSc, lvlSc);
         }
 
         gainDb.fill (0.0f);
@@ -121,7 +143,7 @@ private:
             float peakAmt = 0.0f;
             for (int k = lo_[(size_t) b]; k <= hi_[(size_t) b]; ++k)
             {
-                const float L = lvl[(size_t) k];
+                const float L = bc.sc ? lvlSc[(size_t) k] : lvl[(size_t) k];
                 e[(size_t) k] += (L > e[(size_t) k] ? aA : aR) * (L - e[(size_t) k]);
                 const float am = amount (e[(size_t) k], bc);
                 gainDb[(size_t) k] += w[(size_t) k] * bc.range * am;
@@ -173,9 +195,9 @@ private:
     double fs = 44100.0;
     int pos = 0, hopCount = 0;
     std::array<float, N> win {};
-    std::array<std::array<float, N>, 2> inBuf {}, outBuf {};
-    std::array<std::array<float, 2 * N>, 2> fr {};
-    std::array<float, bins> lvl {}, gainDb {};
+    std::array<std::array<float, N>, 2> inBuf {}, inSc {}, outBuf {};
+    std::array<std::array<float, 2 * N>, 2> fr {}, frSc {};
+    std::array<float, bins> lvl {}, lvlSc {}, gainDb {};
     std::array<std::array<float, bins>, RP::numBands> env {}, weight {};
     std::array<int, RP::numBands> lo_ {}, hi_ {};
     std::array<float, RP::numBands> cachedFreq {}, cachedQ {};

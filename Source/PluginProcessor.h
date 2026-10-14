@@ -39,7 +39,7 @@ public:
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return "Rajvik EQ"; }
+    const juce::String getName() const override { return "RAJVIK Pro EQ"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -52,7 +52,7 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    // instance list (all Rajvik EQ instances living in this process)
+    // instance list (all RAJVIK Pro EQ instances living in this process)
     static std::vector<RajvikEQAudioProcessor*> getInstances();
     static bool snapshotPost (RajvikEQAudioProcessor* other, float* out);
     bool copySettingsFrom (RajvikEQAudioProcessor* other);
@@ -69,11 +69,11 @@ public:
 private:
     struct BandVals
     {
-        bool en, dyn, spec;
+        bool en, dyn, spec, sc;
         int type, slope, place, dir;
         float freq, gain, q, thr, range, att, rel;
     };
-    struct BandPtrs { std::atomic<float> *en, *type, *freq, *gain, *q, *slope, *place, *dyn, *spec, *thr, *range, *att, *rel, *dir; };
+    struct BandPtrs { std::atomic<float> *en, *type, *freq, *gain, *q, *slope, *place, *dyn, *spec, *thr, *range, *att, *rel, *dir, *sc; };
     struct BandState
     {
         RP::BandDesign design;
@@ -95,7 +95,7 @@ private:
     BandVals readBand (int b) const;
     void ensureDesign (BandState&, const BandVals&, double fs);
     int modeOf (const BandVals& v) const { return RP::dynModeOf (v.dyn, v.spec, v.type); }
-    void runBands (float* const* chs, int nCh, int n, bool linear, double fs);
+    void runBands (float* const* chs, int nCh, int n, bool linear, double fs, const float* scL, const float* scR);
     void rebuildIR();
     void updateFlags();
     void parameterChanged (const juce::String&, float) override { irDirty = true; }
@@ -104,6 +104,8 @@ private:
     std::array<BandPtrs, RP::numBands> ptrs;
     std::array<BandState, RP::numBands> bands;
     SpectralStage spec;
+    std::vector<float> scUp[2];       // sidechain upsampled for Natural Phase mode
+    float scPrev[2] { 0.0f, 0.0f };
     juce::dsp::Convolution conv { juce::dsp::Convolution::Latency { 0 } };
     juce::dsp::FFT irFFT { 13 };
 
