@@ -1,12 +1,12 @@
-# Rajvik EQ
+# RAJVIK Pro EQ
 
 A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - no local setup needed.
 
 ## Get the plugin
 1. Push this folder to a GitHub repo.
-2. Open the **Actions** tab -> **Build Rajvik EQ** -> wait for the green tick.
+2. Open the **Actions** tab -> **Build RAJVIK Pro EQ** -> wait for the green tick.
 3. Download the **RajvikEQ-windows-latest-VST3** artifact, unzip.
-4. Copy `Rajvik EQ.vst3` to `C:\Program Files\Common Files\VST3\` and rescan in your DAW.
+4. Copy `RAJVIK Pro EQ.vst3` to `C:\Program Files\Common Files\VST3\` and rescan in your DAW.
 (macOS artifact is built too: copy to `/Library/Audio/Plug-Ins/VST3/`.)
 
 ## Features
@@ -21,12 +21,19 @@ A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - 
 - Processing modes: Zero Latency, Natural Phase (2x oversampled, analog-like response at high frequencies), Linear Phase (latency reported to the DAW)
 - EQ Sketch: press "EQ Sketch", draw a curve (the button switches itself off afterwards), it is converted into bell bands
 - EQ Match: capture Reference (play the reference), capture Source (play your track), press Apply - bands are fitted to the difference
-- Instances list: see other Rajvik EQ instances in the project, show their spectrum behind this one, copy their settings
+- Instances list: see other RAJVIK Pro EQ instances in the project, show their spectrum behind this one, copy their settings
 - Surround: mono up to 16 channels (9.1.6) in the plugin layout; bands apply to every channel
 - Character: Clean / Subtle / Warm, output gain, phase invert
 - Real-time pre/post analyzer, display range 3/6/12/30 dB
 - Frequency range 10 Hz to 20 kHz. "Piano" toggle (bottom bar) shows a piano keyboard strip under the display (one key per semitone on the same frequency axis): the selected band's key lights up with its note name + frequency, and hovering shows the note under the mouse
 - Pro-Q style readout: the selected band always shows its frequency and gain in a bubble next to the node (also while you drag it, wherever you take it); hovering any node shows the same
+- Sidechain: optional second input bus ("Sidechain", mono or stereo). Each Dynamic or Spectral band has a **Sidechain** toggle: its detector then listens to the sidechain input instead of the main signal (works in Zero Latency, Natural and Linear Phase modes). Enable the sidechain input in your DAW's plugin routing.
+- Analyzer: pre (grey line) and post (blue fill) spectrum, 4.5 dB/oct tilt, about 1/12 octave smoothing, and the hover readout also shows the level at the cursor
+- **Multi select (like Pro-Q):** drag a rectangle on empty space, Shift/Ctrl-click to add or remove bands, Ctrl+A for all. Selected bands move together (drag), mouse wheel changes Q of all, arrow keys nudge (Shift = fine), Delete removes them, right-click menu changes type / mode for all. Esc deselects.
+- **Presets:** header bar `< Preset > Save`. 14 factory presets (vocal, bass, de-esser, spectral resonance control, sidechain ducking, ...), "My presets" saved as `.rajpreset` files in your user application data folder (`RajvikEQ/Presets`), delete / open folder from the menu. Presets hold the 24 bands only (not output gain or processing mode).
+- **Spectral is purely spectral:** a Spectral band has no static gain and no dynamic-EQ curve. Its node sits on the 0 dB line (move it for frequency, wheel for width), and the display shows the live per-frequency cut it applies. Dynamic bands keep their static gain + gain offset.
+- **Pre / Post analyzer view:** the dropdown next to Analyzer shows the input spectrum (Pre), the output spectrum (Post) or both.
+- **Auto Peaks:** press the button (bottom bar) and play your audio for ~2.5 seconds. The loudest peaks of the input spectrum are found (up to 6), each gets a narrow bell at 0 dB, and all of them are selected together, so one drag / mouse wheel / arrow key / Delete acts on every peak at once.
 - Interactive display: double-click = add band, drag = freq/gain, wheel = Q, right-click = type/dynamic/delete, double-click a node = remove
 
 ## Look and mouse
