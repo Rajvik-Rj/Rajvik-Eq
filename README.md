@@ -68,3 +68,15 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - **Settings (gear):** new *Reset to default* row: Colours, Size, Reset all (colours, size, mode, oversampling, character, display range, analyzer options, output gain; bands are never touched).
 - **Presets:** 56 factory presets in categories (General, Vocals, Drums, Bass, Guitars & Keys, Mix Bus & Master, Fix & Creative) incl. Mid/Side, dynamic, spectral and hum-remover presets.
 - **Resizing:** window minimum 640 x 400 (unscaled), maximum 3200 x 2000; GUI size 40 - 200 %. The band panel shrinks to fit small windows.
+
+## Band solo
+- **Solo** button in the band panel (next to the close button), also *Solo band* in the right-click menu of a band. You hear only the region that band affects: band-pass at its frequency and Q (low-pass for low shelf / low cut, high-pass for high shelf / high cut), respecting Left / Right / Mid / Side placement. Switching is crossfaded (10 ms).
+- Solo is a monitoring aid: it is not saved, it ends when the editor closes or the band is switched off, and the display shows "SOLO band N" while active.
+
+## v6: new analyzer (Pro-Q style)
+- **Calibrated:** a full scale sine reads 0 dB (within the 1.4 dB scalloping of the Hann window). Left and right are analyzed separately and their power is averaged (a mono sum hides or invents peaks through phase cancellation).
+- **Scale:** 0 dBFS at the top, range 60 / 90 / 120 dB (default 90) with its own dB labels on the left. Before, the analyzer was squeezed into a 80 dB window that reached the top of the panel.
+- **Settings (gear > Analyzer):** View (Pre / Post / Both), Range, **Resolution** (Low 2048 / Medium 4096 / High 8192 / Maximum 16384 point FFT), **Speed** (release: very slow .. very fast), **Tilt** (0 / 1.5 / 3 / 4.5 / 6 dB per octave around 1 kHz, default 4.5), **Freeze**.
+- **Accuracy:** low frequencies are interpolated without overshoot, high frequencies use a power average over about 3 pixels; a peak is drawn at the frequency where it really is. Only the shown spectrum (Pre or Post) is calculated, the analyzer uses no CPU when switched off.
+- Auto Peaks and EQ Match keep their own fixed 4096 point analysis, independent of the resolution setting.
+- Note: broadband noise reads about 3 dB lower for every higher resolution step (narrower bins); tones keep their level.
