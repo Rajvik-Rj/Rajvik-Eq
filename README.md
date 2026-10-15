@@ -55,3 +55,16 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - **Gear (settings):** GUI colour (8 presets + custom colour picker), background theme (5), **GUI size 60 - 150 %**, and the moved options: Analyzer, Piano view, Phase invert, Analyzer view, Display range, Character. Settings are saved in `<user app data>/RajvikEQ/settings.xml` (shared by all instances).
 - **Resizing:** drag the window corner freely (minimum is 1000 x 520 at 100 %); use GUI size below 100 % to make the whole plugin smaller on screen (e.g. 60 % = 600 x 312 minimum).
 - **Spectral dynamics follow Q:** a Spectral band only reacts inside its own width (f0 / Q, exactly the shaded region on the display). Higher Q = narrower, lower Q = wider; bins far from the band are untouched.
+
+## Multi-band editing, smoother sound
+- **Group panel:** select several bands (rectangle, Shift/Ctrl-click, Ctrl+A) and the same band panel opens for the whole group. Knobs are *relative*: GAIN +/- dB, FREQ +/- octaves, Q x factor, THRESH / RANGE +/- dB, ATTACK / RELEASE x factor - each change is applied to every selected band by the same amount (double-click a knob = back to no change). Type, slope, stereo placement, Normal/Dynamic/Spectral mode, direction and sidechain are set on all bands; a field is blank when the bands differ.
+- **No zipper noise:** frequency, gain and Q glide (about 12 ms) instead of jumping; output gain and phase invert are smoothed; switching a band on or off crossfades over 5 ms (no clicks).
+- **CPU:** spectral bands only process the bins inside their own width; the response curves in the editor use a cheaper exact formula.
+- **Latency:** Zero Latency mode = 0 samples. Natural Phase = a few samples. Spectral bands add 2048 samples only while at least one is enabled. Linear Phase = 4096 samples.
+
+## v4: oversampling, defaults, presets, resizing
+- **Oversampling** (bottom bar): Off / 2x / 4x / 8x for the EQ bands (Zero Latency and Natural Phase modes; Natural Phase is always at least 2x). Minimum-phase half-band resampling = only a few samples of latency, which is reported to the host. Linear Phase designs its FIR at 2x internally.
+- **What you see is what you hear:** the response curve, band fitting (EQ Sketch / Match / Auto Peaks) and the dynamic detector all use the same filter design and sample rate as the audio path (including oversampling), and a spectral band reacts exactly inside the region shaded on the display.
+- **Settings (gear):** new *Reset to default* row: Colours, Size, Reset all (colours, size, mode, oversampling, character, display range, analyzer options, output gain; bands are never touched).
+- **Presets:** 56 factory presets in categories (General, Vocals, Drums, Bass, Guitars & Keys, Mix Bus & Master, Fix & Creative) incl. Mid/Side, dynamic, spectral and hum-remover presets.
+- **Resizing:** window minimum 640 x 400 (unscaled), maximum 3200 x 2000; GUI size 40 - 200 %. The band panel shrinks to fit small windows.
