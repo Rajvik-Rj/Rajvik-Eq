@@ -60,6 +60,8 @@ public:
     void updateTrackProperties (const TrackProperties& p) override;
 
     const SpectralStage& spectralStage() const { return spec; }
+    // sample rate multiplier the bands are really designed at (oversampling / linear phase), so the display matches what you hear
+    int responseRateFactor() const { return linearActive.load() ? 2 : (1 << osStage.load()); }
 
     juce::AudioProcessorValueTreeState apvts;
     Analyzer preAnalyzer, postAnalyzer;
@@ -79,14 +81,15 @@ private:
         RP::BandDesign design;
         RP::Biquad f[16][RP::maxSections];
         RP::Biquad det;
-        double env = 0.0, appliedDyn = 0.0;
+        double env = 0.0, appliedDyn = 0.0, sF = 0.0, sG = 0.0, sQ = 1.0, mix = 0.0;
+        bool smInit = false;
         int keyType = -1, keySlope = -1;
         double keyFreq = 0, keyGain = 1e9, keyQ = 0, keyDF = 0, keyDQ = 0, keyFs = 0, keyDFs = 0;
         bool wasOn = false;
         void reset()
         {
             for (auto& ch : f) for (auto& s : ch) s.reset();
-            det.reset(); env = 0.0; appliedDyn = 0.0; keyType = -1; keyDF = 0;
+            det.reset(); env = 0.0; appliedDyn = 0.0; keyType = -1; keyDF = 0; smInit = false;
         }
     };
 
@@ -104,14 +107,18 @@ private:
     std::array<BandPtrs, RP::numBands> ptrs;
     std::array<BandState, RP::numBands> bands;
     SpectralStage spec;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outGain { 1.0f };
     std::vector<float> scUp[2];       // sidechain upsampled for Natural Phase mode
     float scPrev[2] { 0.0f, 0.0f };
     juce::dsp::Convolution conv { juce::dsp::Convolution::Latency { 0 } };
     juce::dsp::FFT irFFT { 13 };
 
-    std::atomic<bool> irDirty { true }, linearActive { false }, spectralActive { false }, naturalActive { false };
-    bool lastLinear = false, lastSpectral = false, lastNatural = false;
-    juce::dsp::Oversampling<float> os { 2, 1, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true };
+    std::atomic<bool> irDirty { true }, linearActive { false }, spectralActive { false };
+    std::atomic<int> osStage { 0 };   // 0 = off, 1..3 = 2x..8x
+    bool lastLinear = false, lastSpectral = false;
+    int lastStage = 0;
+    std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, 3> os;   // 2x, 4x, 8x
+    int maxBlock = 512;
     juce::String trackName;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RajvikEQAudioProcessor)

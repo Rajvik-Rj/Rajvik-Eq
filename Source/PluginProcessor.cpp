@@ -47,6 +47,8 @@ RajvikEQAudioProcessor::RajvikEQAudioProcessor()
       apvts (*this, nullptr, "STATE", createLayout())
 {
     for (auto& d : dynDb) d.store (0.0f);
+    for (int i = 0; i < 3; ++i)   // created once (never replaced) so the editor / timer can always read them
+        os[(size_t) i] = std::make_unique<juce::dsp::Oversampling<float>> (2, (size_t) (i + 1), juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true);
     for (int b = 0; b < numBands; ++b)
     {
         auto g = [this, b] (const char* n) { return apvts.getRawParameterValue (pid (b, n)); };
@@ -84,11 +86,19 @@ bool RajvikEQAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) const
 void RajvikEQAudioProcessor::prepareToPlay (double sr, int block)
 {
     conv.prepare ({ sr, (juce::uint32) block, 2 });
-    os.initProcessing ((size_t) block);
-    os.reset();
+    maxBlock = juce::jmax (1, block);
+    for (auto& o : os)
+    {
+        o->initProcessing ((size_t) maxBlock);
+        o->reset();
+    }
     spec.prepare (sr);
+    outGain.reset (sr, 0.02);
+    outGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (apvts.getRawParameterValue ("out_gain")->load())
+                                      * (apvts.getRawParameterValue ("invert")->load() > 0.5f ? -1.0f : 1.0f));
     for (auto& b : bands) b.reset();
-    lastLinear = lastSpectral = lastNatural = false;
+    lastLinear = lastSpectral = false;
+    lastStage = 0;
     updateFlags();
     irDirty = true;
     if (linearActive.load()) { rebuildIR(); irDirty = false; }
@@ -111,6 +121,9 @@ void RajvikEQAudioProcessor::updateFlags()
     const bool two = getMainBusNumInputChannels() == 2;
     const int mode = (int) apvts.getRawParameterValue ("mode")->load();
     const bool lin = two && mode == 2, nat = two && mode == 1;
+    // oversampling: Zero Latency / Natural Phase run the bands at 2x / 4x / 8x (Natural Phase is always at least 2x)
+    const int osParam = (int) apvts.getRawParameterValue ("os")->load();
+    const int stage = (two && ! lin) ? juce::jmax (osParam, nat ? 1 : 0) : 0;
     bool sp = false;
     if (two)
         for (int b = 0; b < numBands; ++b)
@@ -119,9 +132,10 @@ void RajvikEQAudioProcessor::updateFlags()
             if (v.en && modeOf (v) == ModeSpectral) sp = true;
         }
     linearActive = lin;
-    naturalActive = nat;
+    osStage = stage;
     spectralActive = sp;
-    const int lat = (lin ? irLen / 2 : 0) + (nat ? (int) os.getLatencyInSamples() : 0) + (sp ? SpectralStage::N : 0);
+    const int osLat = (stage > 0 && os[(size_t) (stage - 1)] != nullptr) ? (int) std::lround (os[(size_t) (stage - 1)]->getLatencyInSamples()) : 0;
+    const int lat = (lin ? irLen / 2 : 0) + osLat + (sp ? SpectralStage::N : 0);
     if (lat != getLatencySamples()) setLatencySamples (lat);
 }
 
@@ -155,10 +169,10 @@ void RajvikEQAudioProcessor::rebuildIR()
             const bool affects = v.place == Stereo || (ch == 0 && v.place == Left) || (ch == 1 && v.place == Right);
             if (! affects) continue;
             BandDesign d;
-            design (d, v.type, v.freq, v.gain, v.q, v.slope, fs);
+            design (d, v.type, v.freq, v.gain, v.q, v.slope, fs * 2.0);   // designed at 2x: the linear phase FIR has no cramping towards Nyquist
             for (int k = 0; k <= half; ++k)
             {
-                const double w = detail::twoPi * (double) k / (double) N;
+                const double w = detail::twoPi * 0.5 * (double) k / (double) N;
                 double m = 1.0;
                 for (int s = 0; s < d.n; ++s) m *= magSq (d.sec[s], w);
                 mag[(size_t) k] *= std::sqrt (m);
@@ -195,6 +209,8 @@ void RajvikEQAudioProcessor::ensureDesign (BandState& s, const BandVals& v, doub
 void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool linear, double fs, const float* scL, const float* scR)
 {
     constexpr int sub = 32;
+    const double glide = 1.0 - std::exp (-(double) sub / (0.012 * fs));   // parameter smoothing (about 12 ms) so moving a knob never zippers
+    const double fadeStep = 1.0 / (0.005 * fs);                              // band on / off crossfade (5 ms)
 
     for (int b = 0; b < numBands; ++b)
     {
@@ -209,17 +225,11 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         const int kind = modeOf (v);
         const bool dynamic = kind == ModeDynamic || (kind == ModeSpectral && nCh != 2);
         const bool hybrid = dynamic || v.place == Mid || v.place == Side;
-        if (! v.en || (kind == ModeSpectral && nCh == 2) || (linear && ! hybrid)) { s.wasOn = false; continue; }   // stereo Spectral bands live in the STFT stage only
-        if (! s.wasOn) { s.reset(); s.wasOn = true; }
+        const bool active = v.en && ! (kind == ModeSpectral && nCh == 2) && ! (linear && ! hybrid);   // stereo Spectral bands live in the STFT stage only
+        if (! active && s.mix <= 0.0) { s.wasOn = false; continue; }
+        if (! s.wasOn) { s.reset(); s.mix = 0.0; s.wasOn = true; }
 
         if (! dynamic) s.appliedDyn = 0.0;
-        ensureDesign (s, v, fs);
-
-        if (dynamic && (s.keyDF != v.freq || s.keyDQ != v.q || s.keyDFs != fs))
-        {
-            s.det.c = detail::bandpass (juce::jlimit (5.0, fs * 0.49, (double) v.freq), juce::jmax (0.5, (double) v.q), fs);
-            s.keyDF = v.freq; s.keyDQ = v.q; s.keyDFs = fs;
-        }
         const double ac = std::exp (-1.0 / (0.001 * juce::jmax (0.1f, v.att) * fs));
         const double rc = std::exp (-1.0 / (0.001 * juce::jmax (1.0f, v.rel) * fs));
 
@@ -228,6 +238,30 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         for (int start = 0; start < n; start += sub)
         {
             const int len = juce::jmin (sub, n - start);
+
+            // smooth frequency / gain / Q towards their targets (log domain for frequency and Q)
+            if (! s.smInit) { s.sF = v.freq; s.sG = v.gain; s.sQ = v.q; s.smInit = true; }
+            else
+            {
+                auto glideLog = [glide] (double& cur, double tgt) { const double r = tgt / cur; if (std::abs (r - 1.0) < 1.0e-5) cur = tgt; else cur *= std::pow (r, glide); };
+                glideLog (s.sF, v.freq);
+                glideLog (s.sQ, juce::jmax (0.02, (double) v.q));
+                if (std::abs ((double) v.gain - s.sG) < 1.0e-4) s.sG = v.gain; else s.sG += ((double) v.gain - s.sG) * glide;
+            }
+            v.freq = (float) s.sF; v.q = (float) s.sQ; v.gain = (float) s.sG;
+            if (! dynamic) ensureDesign (s, v, fs);
+            if (dynamic && (s.keyDF != v.freq || s.keyDQ != v.q || s.keyDFs != fs))
+            {
+                s.det.c = detail::bandpass (juce::jlimit (5.0, fs * 0.49, (double) v.freq), juce::jmax (0.1, (double) v.q), fs);
+                s.keyDF = v.freq; s.keyDQ = v.q; s.keyDFs = fs;
+            }
+
+            // band on / off: short crossfade instead of a hard switch (no clicks)
+            const double m0 = s.mix;
+            const double m1 = active ? juce::jmin (1.0, m0 + fadeStep * len) : juce::jmax (0.0, m0 - fadeStep * len);
+            s.mix = m1;
+            const double dm = (m1 - m0) / (double) len;
+            auto bl = [m0, dm] (double dry, double wet, int i) { return dry + (m0 + dm * (double) (i + 1)) * (wet - dry); };
 
             if (dynamic)
             {
@@ -263,20 +297,20 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
                     for (int c = 0; c < nCh; ++c)
                     {
                         float* p = chs[c] + start;
-                        for (int i = 0; i < len; ++i) p[i] = (float) casc (c, p[i]);
+                        for (int i = 0; i < len; ++i) p[i] = (float) bl (p[i], casc (c, p[i]), i);
                     }
                     break;
                 case Left:
                 {
                     float* p = chs[0] + start;
-                    for (int i = 0; i < len; ++i) p[i] = (float) casc (0, p[i]);
+                    for (int i = 0; i < len; ++i) p[i] = (float) bl (p[i], casc (0, p[i]), i);
                     break;
                 }
                 case Right:
                     if (nCh > 1)
                     {
                         float* p = chs[1] + start;
-                        for (int i = 0; i < len; ++i) p[i] = (float) casc (1, p[i]);
+                        for (int i = 0; i < len; ++i) p[i] = (float) bl (p[i], casc (1, p[i]), i);
                     }
                     break;
                 case Mid:
@@ -288,8 +322,8 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
                         for (int i = 0; i < len; ++i)
                         {
                             const double m = 0.5 * ((double) l[i] + r[i]), sd = 0.5 * ((double) l[i] - r[i]);
-                            if (v.place == Mid) { const double mo = casc (0, m); l[i] = (float) (mo + sd); r[i] = (float) (mo - sd); }
-                            else                { const double so = casc (1, sd); l[i] = (float) (m + so); r[i] = (float) (m - so); }
+                            if (v.place == Mid) { const double mo = bl (m, casc (0, m), i); l[i] = (float) (mo + sd); r[i] = (float) (mo - sd); }
+                            else                { const double so = bl (sd, casc (1, sd), i); l[i] = (float) (m + so); r[i] = (float) (m - so); }
                         }
                     }
                     break;
@@ -326,10 +360,10 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     preAnalyzer.push (L, R, n);
 
     const bool linear = linearActive.load() && nCh == 2;
-    const bool natural = naturalActive.load() && nCh == 2;
+    const int stage = nCh == 2 ? osStage.load() : 0;
     const bool spectral = spectralActive.load() && nCh == 2;
     if (linear != lastLinear)     { conv.reset(); for (auto& b : bands) b.reset(); lastLinear = linear; }
-    if (natural != lastNatural)   { os.reset(); for (auto& b : bands) b.reset(); lastNatural = natural; }
+    if (stage != lastStage)       { for (auto& o : os) if (o != nullptr) o->reset(); for (auto& b : bands) b.reset(); lastStage = stage; }
     if (spectral != lastSpectral) { spec.reset(); lastSpectral = spectral; }
 
     const double fs = getSampleRate();
@@ -342,35 +376,42 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         conv.process (ctx);
     }
 
-    if (natural)
+    if (stage > 0 && os[(size_t) (stage - 1)] != nullptr)
     {
-        // Natural phase: run the bands at 2x so the filters behave like their analog prototypes
-        // (no cramping towards Nyquist), with a minimum-phase IIR resampler.
+        // Oversampled bands (2x / 4x / 8x): the filters behave like their analog prototypes (no cramping towards Nyquist),
+        // resampled with a minimum-phase IIR half-band chain (lowest latency).
+        auto& o = *os[(size_t) (stage - 1)];
+        const int factor = 1 << stage;
         juce::dsp::AudioBlock<float> block (buffer);
-        auto sub = block.getSubsetChannelBlock (0, 2);
-        auto up = os.processSamplesUp (sub);
-        float* upCh[2] = { up.getChannelPointer (0), up.getChannelPointer (1) };
-        const int upN = (int) up.getNumSamples();
-        const float* upL = nullptr;
-        const float* upR = nullptr;
-        if (scL != nullptr)   // sidechain to the 2x rate (linear interpolation)
+        auto stereo = block.getSubsetChannelBlock (0, 2);
+        for (int start = 0; start < n; start += maxBlock)   // never hand the resampler more than the prepared block size
         {
-            for (int ch = 0; ch < 2; ++ch)
+            const int len = juce::jmin (maxBlock, n - start);
+            auto sub = stereo.getSubBlock ((size_t) start, (size_t) len);
+            auto up = o.processSamplesUp (sub);
+            float* upCh[2] = { up.getChannelPointer (0), up.getChannelPointer (1) };
+            const int upN = (int) up.getNumSamples();
+            const float* upL = nullptr;
+            const float* upR = nullptr;
+            if (scL != nullptr)   // sidechain to the oversampled rate (linear interpolation)
             {
-                if ((int) scUp[ch].size() < upN) scUp[ch].resize ((size_t) upN);
-                const float* src = ch == 0 ? scL : scR;
-                for (int i = 0; i < n; ++i)
+                for (int ch = 0; ch < 2; ++ch)
                 {
-                    const float cur = src[i];
-                    scUp[ch][(size_t) (2 * i)] = 0.5f * (scPrev[ch] + cur);
-                    scUp[ch][(size_t) (2 * i + 1)] = cur;
-                    scPrev[ch] = cur;
+                    if ((int) scUp[ch].size() < upN) scUp[ch].resize ((size_t) upN);
+                    const float* src = (ch == 0 ? scL : scR) + start;
+                    for (int i = 0; i < len; ++i)
+                    {
+                        const float cur = src[i];
+                        for (int j = 0; j < factor; ++j)
+                            scUp[ch][(size_t) (i * factor + j)] = scPrev[ch] + (cur - scPrev[ch]) * (float) (j + 1) / (float) factor;
+                        scPrev[ch] = cur;
+                    }
                 }
+                upL = scUp[0].data(); upR = scUp[1].data();
             }
-            upL = scUp[0].data(); upR = scUp[1].data();
+            runBands (upCh, 2, upN, false, fs * (double) factor, upL, upR);
+            o.processSamplesDown (sub);
         }
-        runBands (upCh, 2, upN, false, fs * 2.0, upL, upR);
-        os.processSamplesDown (sub);
     }
     else
     {
@@ -394,19 +435,23 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
 
     const int mode = (int) apvts.getRawParameterValue ("character")->load();
-    const float gain = juce::Decibels::decibelsToGain (apvts.getRawParameterValue ("out_gain")->load())
-                     * (apvts.getRawParameterValue ("invert")->load() > 0.5f ? -1.0f : 1.0f);
-    for (int c = 0; c < nCh; ++c)
+    outGain.setTargetValue (juce::Decibels::decibelsToGain (apvts.getRawParameterValue ("out_gain")->load())
+                            * (apvts.getRawParameterValue ("invert")->load() > 0.5f ? -1.0f : 1.0f));
+    if (outGain.isSmoothing() || mode != 0 || std::abs (outGain.getTargetValue() - 1.0f) > 1.0e-6f)
     {
-        float* d = chs[c];
-        for (int i = 0; i < n; ++i)
+        for (int i = 0; i < n; ++i)   // one smoothed gain per sample, shared by all channels (no zipper noise, click free phase invert)
         {
-            float x = d[i];
-            if (mode == 1)      x = std::tanh (x);
-            else if (mode == 2) x = (std::tanh (1.4f * x + 0.08f) - 0.07983f) / 1.391f;
-            d[i] = x * gain;
+            const float g = outGain.getNextValue();
+            for (int c = 0; c < nCh; ++c)
+            {
+                float x = chs[c][i];
+                if (mode == 1)      x = std::tanh (x);
+                else if (mode == 2) x = (std::tanh (1.4f * x + 0.08f) - 0.07983f) / 1.391f;
+                chs[c][i] = x * g;
+            }
         }
     }
+    else outGain.skip (n);
 
     float pkL = 0.0f, pkR = 0.0f;
     for (int i = 0; i < n; ++i) { pkL = juce::jmax (pkL, std::abs (L[i])); pkR = juce::jmax (pkR, std::abs (R[i])); }

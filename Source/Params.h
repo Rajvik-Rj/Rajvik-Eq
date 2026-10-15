@@ -14,6 +14,7 @@ inline const int               slopeOrders[]  { 1, 2, 3, 4, 6, 8, 12, 16, 32 };
 inline const juce::StringArray placementNames { "Stereo", "Left", "Right", "Mid", "Side" };
 inline const juce::StringArray dirNames       { "Above", "Below" };
 inline const juce::StringArray modeNames      { "Zero Latency", "Natural Phase", "Linear Phase" };
+inline const juce::StringArray osNames        { "Off", "2x", "4x", "8x" };
 inline const juce::StringArray charNames      { "Clean", "Subtle", "Warm" };
 inline const juce::StringArray anaViewNames   { "Pre", "Post", "Pre + Post" };
 inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "30 dB" };
@@ -108,6 +109,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (mk ("out_gain", "Output Gain", NormalisableRange<float> (-24.0f, 24.0f, 0.1f), 0.0f, fmt ("dB", 1, true), parse()));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "mode", 1 },       "Processing Mode", modeNames, 0));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "character", 1 },  "Character", charNames, 0));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "os", 1 },         "Oversampling", osNames, 0));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "disp_range", 1 }, "Display Range", rangeNames, 2));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "analyzer", 1 },   "Analyzer", true));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_view", 1 },   "Analyzer View", anaViewNames, 2));

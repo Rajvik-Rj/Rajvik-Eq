@@ -63,7 +63,8 @@ void EQDisplay::toggleSel (int b)
     if (selSet[(size_t) b]) selected = b;
     else if (! g.empty()) selected = g.front();
     if (g.size() == 1) { if (onSelect) onSelect (selected); }
-    else if (onBackgroundClick) onBackgroundClick();   // the band panel only shows for a single band
+    else if (g.size() > 1) { if (onMultiSelect) onMultiSelect(); }   // the band panel edits the whole group (relative changes)
+    else if (onBackgroundClick) onBackgroundClick();
     repaint();
 }
 
@@ -287,8 +288,8 @@ void EQDisplay::paint (juce::Graphics& g)
         }
     }
 
-    // band designs (static gain + current dynamic offset)
-    const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
+    // band designs (static gain + current dynamic offset), at the rate the bands really run at (oversampling / linear phase)
+    const double fs = (proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0) * (double) proc.responseRateFactor();
     std::array<BandDesign, numBands> designs;
     std::array<bool, numBands> on {};
     int numOn = 0;
@@ -370,7 +371,7 @@ void EQDisplay::paint (juce::Graphics& g)
     {
         juce::String st;
         if (sketchMode) st = "EQ SKETCH: draw a curve with the mouse";
-        { const auto grp = groupBands(); if (grp.size() > 1) st = juce::String ((int) grp.size()) + " bands selected: drag = move together, wheel = Q, arrows = nudge, Del = delete"; }
+        { const auto grp = groupBands(); if (grp.size() > 1) st = juce::String ((int) grp.size()) + " bands selected: drag / wheel / arrows move them together, the panel changes all of them by the same amount, Del = delete"; }
         if (peakListen > 0) st = "AUTO PEAKS: listening... play your audio (" + juce::String (peakListen * 100 / 75) + "%)";
         if (capMode == 1) st = "MATCH: capturing REFERENCE - play the reference track (" + juce::String (refN) + ")";
         if (capMode == 2) st = "MATCH: capturing SOURCE - play your track (" + juce::String (srcN) + ")";
@@ -597,6 +598,7 @@ void EQDisplay::finishMarquee (bool additive)
     const auto g = groupBands();
     if (! hit.empty()) selected = hit.front();
     if (g.size() == 1) { if (onSelect) onSelect (g.front()); }
+    else if (g.size() > 1) { if (onMultiSelect) onMultiSelect(); }
     else if (onBackgroundClick) onBackgroundClick();
     repaint();
 }
@@ -631,7 +633,7 @@ bool EQDisplay::keyPressed (const juce::KeyPress& k)
     {
         for (int b = 0; b < numBands; ++b) selSet[(size_t) b] = apvtsVal (pid (b, "en")) > 0.5f;
         const auto all = groupBands();
-        if (all.size() > 1 && onBackgroundClick) onBackgroundClick();
+        if (all.size() > 1 && onMultiSelect) onMultiSelect();
         repaint();
         return true;
     }
@@ -727,7 +729,7 @@ void EQDisplay::showMenu (int b)
         if (r == 40)
         {
             for (int k = 0; k < numBands; ++k) d->selSet[(size_t) k] = d->apvtsVal (pid (k, "en")) > 0.5f;
-            if (d->onBackgroundClick) d->onBackgroundClick();
+            if (d->groupBands().size() > 1) { if (d->onMultiSelect) d->onMultiSelect(); }
             d->repaint();
             return;
         }
@@ -758,7 +760,7 @@ int EQDisplay::freeBand() const
 // Greedy fit: repeatedly drop a Bell on the biggest remaining error, measure its width, subtract it.
 void EQDisplay::fitToTarget (std::vector<float> r, int maxBands)
 {
-    const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
+    const double fs = (proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0) * (double) proc.responseRateFactor();
     const int w = (int) r.size();
     if (w < 8) return;
     int last = -1;
@@ -921,7 +923,7 @@ void EQDisplay::finishPeakSearch()
         used.push_back (pk.x);
         ++made;
     }
-    if (first >= 0) { selected = first; if (made > 1 && onBackgroundClick) onBackgroundClick(); else if (onSelect) onSelect (first); }
+    if (first >= 0) { selected = first; if (made > 1) { if (onMultiSelect) onMultiSelect(); } else if (onSelect) onSelect (first); }
     repaint();
 }
 
@@ -1013,20 +1015,36 @@ int BandPanel::dynMode() const
 }
 bool BandPanel::canDynamic() const { return typeHasGain ((int) proc.apvts.getRawParameterValue (pid (band, "type"))->load()); }
 
+std::vector<int> BandPanel::targets() const
+{
+    if (groupMode) return group;
+    return { band };
+}
+
+void BandPanel::setParam (int b, const char* name, float v)
+{
+    if (auto* p = proc.apvts.getParameter (pid (b, name))) p->setValueNotifyingHost (p->convertTo0to1 (v));
+}
+
 void BandPanel::setDynMode (int mode)
 {
-    if (mode < 0 || mode > ModeSpectral || (mode != ModeNormal && ! canDynamic())) return;
-    auto set = [this] (const char* n, bool on)
+    if (mode < 0 || mode > ModeSpectral) return;
+    for (int b : targets())
     {
-        if (auto* p = proc.apvts.getParameter (pid (band, n)))
+        const int t = (int) proc.apvts.getRawParameterValue (pid (b, "type"))->load();
+        if (mode != ModeNormal && ! typeHasGain (t)) continue;   // only gain type bands can be dynamic
+        auto set = [this, b] (const char* n, bool on)
         {
-            p->beginChangeGesture();
-            p->setValueNotifyingHost (on ? 1.0f : 0.0f);
-            p->endChangeGesture();
-        }
-    };
-    set ("dyn",  mode != ModeNormal);
-    set ("spec", mode == ModeSpectral);
+            if (auto* p = proc.apvts.getParameter (pid (b, n)))
+            {
+                p->beginChangeGesture();
+                p->setValueNotifyingHost (on ? 1.0f : 0.0f);
+                p->endChangeGesture();
+            }
+        };
+        set ("dyn",  mode != ModeNormal);
+        set ("spec", mode == ModeSpectral);
+    }
     update();
 }
 
@@ -1040,6 +1058,22 @@ int BandPanel::idealWidth() const { return dynOn() ? 878 : 550; }
 void BandPanel::select (int b)
 {
     band = b;
+    if (groupMode)   // back to single band editing: drop the group handlers
+    {
+        groupMode = false; group.clear(); groupSig = -1;
+        typeBox.onChange = nullptr; slopeBox.onChange = nullptr; placeBox.onChange = nullptr; dirBox.onChange = nullptr;
+        enBtn.onClick = nullptr; scBtn.onClick = nullptr;
+        static const char* names[] = { "FREQ", "GAIN", "Q", "THRESH", "RANGE", "ATTACK", "RELEASE" };
+        static const bool bip[] = { false, true, false, false, true, false, false };
+        for (int k = 0; k < numKnobs; ++k)
+        {
+            auto& kn = knobRef (k);
+            kn.s.onValueChange = nullptr; kn.s.onDragStart = nullptr; kn.s.onDragEnd = nullptr;
+            kn.s.getProperties().set ("bipolar", bip[k]);
+            kn.l.setText (names[k], juce::dontSendNotification);
+        }
+        prevBtn.setVisible (true); nextBtn.setVisible (true);
+    }
     freqA.reset(); gainA.reset(); qA.reset(); thrA.reset(); rangeA.reset(); attA.reset(); relA.reset();
     typeA.reset(); slopeA.reset(); placeA.reset(); dirA.reset(); enA.reset(); scA.reset();
 
@@ -1072,6 +1106,7 @@ void BandPanel::select (int b)
 
 void BandPanel::update()
 {
+    if (groupMode) { refreshGroupControls(); return; }
     const int m = dynMode();
     const bool d = m != ModeNormal, c = isCut(), cd = canDynamic();
     if (m == lastMode && c == lastCut && cd == lastCanDyn) return;
@@ -1089,6 +1124,211 @@ void BandPanel::update()
     repaint();
 }
 
+// ---- group (multi band) editing: every change is applied to all selected bands by the same amount ----
+void BandPanel::setGroup (const std::vector<int>& bands)
+{
+    if (bands.empty()) return;
+    if (groupMode && bands == group) return;
+    const bool wasGroup = groupMode;
+    group = bands;
+    band = bands.front();
+    groupMode = true;
+    groupSig = -1;
+    lastMode = -1;
+
+    if (! wasGroup)
+    {
+        freqA.reset(); gainA.reset(); qA.reset(); thrA.reset(); rangeA.reset(); attA.reset(); relA.reset();
+        typeA.reset(); slopeA.reset(); placeA.reset(); dirA.reset(); enA.reset(); scA.reset();
+        configureKnobsForGroup();
+    }
+    for (int k = 0; k < numKnobs; ++k)   // relative knobs always start at "no change"
+    {
+        const double neutral = (k == KQ || k == KAtt || k == KRel) ? 1.0 : 0.0;
+        knobRef (k).s.setValue (neutral, juce::dontSendNotification);
+        lastVal[k] = neutral;
+        knobRef (k).s.updateText();
+    }
+
+    numLabel.setText (juce::String ((int) bands.size()) + " sel", juce::dontSendNotification);
+    numLabel.setColour (juce::Label::textColourId, Look::gold);
+    for (int k = 0; k < numKnobs; ++k) knobRef (k).s.setColour (juce::Slider::rotarySliderFillColourId, Look::gold);
+
+    typeBox.onChange = [this]
+    {
+        const int t = typeBox.getSelectedId() - 1;
+        if (t < 0) return;
+        for (int b : group) setParam (b, "type", (float) t);
+    };
+    slopeBox.onChange = [this]
+    {
+        const int s = slopeBox.getSelectedId() - 1;
+        if (s < 0) return;
+        for (int b : group)
+        {
+            const int t = (int) proc.apvts.getRawParameterValue (pid (b, "type"))->load();
+            if (t == LowCut || t == HighCut) setParam (b, "slope", (float) s);
+        }
+    };
+    placeBox.onChange = [this]
+    {
+        const int p = placeBox.getSelectedId() - 1;
+        if (p < 0) return;
+        for (int b : group) setParam (b, "place", (float) p);
+    };
+    dirBox.onChange = [this]
+    {
+        const int d = dirBox.getSelectedId() - 1;
+        if (d < 0) return;
+        for (int b : group)
+        {
+            const auto& v = proc.apvts;
+            if (dynModeOf (v.getRawParameterValue (pid (b, "dyn"))->load() > 0.5f, v.getRawParameterValue (pid (b, "spec"))->load() > 0.5f,
+                           (int) v.getRawParameterValue (pid (b, "type"))->load()) != ModeNormal)
+                setParam (b, "dir", (float) d);
+        }
+    };
+    enBtn.onClick = [this]   // the power button switches the whole group off
+    {
+        if (enBtn.getToggleState()) return;
+        for (int b : group) setParam (b, "en", 0.0f);
+    };
+    scBtn.onClick = [this]
+    {
+        const float on = scBtn.getToggleState() ? 1.0f : 0.0f;
+        for (int b : group)
+        {
+            const auto& v = proc.apvts;
+            if (dynModeOf (v.getRawParameterValue (pid (b, "dyn"))->load() > 0.5f, v.getRawParameterValue (pid (b, "spec"))->load() > 0.5f,
+                           (int) v.getRawParameterValue (pid (b, "type"))->load()) != ModeNormal)
+                setParam (b, "sc", on);
+        }
+    };
+
+    prevBtn.setVisible (false);
+    nextBtn.setVisible (false);
+    refreshGroupControls();
+    repaint();
+}
+
+void BandPanel::configureKnobsForGroup()
+{
+    struct GK { const char* label; double lo, hi; int kind; };   // kind: 0 octave shift, 1 dB offset, 2 multiplier
+    static const GK gk[numKnobs] =
+    {
+        { "FREQ +/-",   -3.0,  3.0, 0 },
+        { "GAIN +/-",  -30.0, 30.0, 1 },
+        { "Q x",         0.25, 4.0, 2 },
+        { "THRESH +/-", -40.0, 40.0, 1 },
+        { "RANGE +/-",  -30.0, 30.0, 1 },
+        { "ATTACK x",    0.1, 10.0, 2 },
+        { "RELEASE x",   0.1, 10.0, 2 }
+    };
+
+    for (int k = 0; k < numKnobs; ++k)
+    {
+        auto& kn = knobRef (k);
+        const auto& d = gk[k];
+        juce::NormalisableRange<double> r (d.lo, d.hi, 0.01);
+        if (d.kind == 2) r.setSkewForCentre (1.0);
+        kn.s.setNormalisableRange (r);
+        kn.s.setDoubleClickReturnValue (true, d.kind == 2 ? 1.0 : 0.0);
+        kn.s.getProperties().set ("bipolar", true);
+        kn.l.setText (d.label, juce::dontSendNotification);
+        const int kind = d.kind;
+        kn.s.textFromValueFunction = [kind] (double v)
+        {
+            if (kind == 2) return "x" + juce::String (v, 2);
+            return (v > 0.004 ? juce::String ("+") : juce::String()) + juce::String (v, kind == 0 ? 2 : 1) + (kind == 0 ? " oct" : " dB");
+        };
+        kn.s.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("-+.0123456789").getDoubleValue(); };
+        kn.s.onValueChange = [this, k] { groupKnobChanged (k); };
+        kn.s.onDragStart = [this, k] { groupGesture (k, true); };
+        kn.s.onDragEnd = [this, k] { groupGesture (k, false); };
+    }
+}
+
+void BandPanel::groupGesture (int k, bool begin)
+{
+    static const char* names[numKnobs] = { "freq", "gain", "q", "thr", "range", "att", "rel" };
+    for (int b : group)
+        if (auto* p = proc.apvts.getParameter (pid (b, names[k]))) { if (begin) p->beginChangeGesture(); else p->endChangeGesture(); }
+}
+
+void BandPanel::groupKnobChanged (int k)
+{
+    if (! groupMode || group.empty()) return;
+    const double v = knobRef (k).s.getValue(), last = lastVal[k];
+    lastVal[k] = v;
+    const double d = v - last, ratio = last != 0.0 ? v / last : 1.0;
+    if (d == 0.0) return;
+
+    for (int b : group)
+    {
+        auto get = [this, b] (const char* n) { return proc.apvts.getRawParameterValue (pid (b, n))->load(); };
+        const int t = (int) get ("type");
+        const int kind = dynModeOf (get ("dyn") > 0.5f, get ("spec") > 0.5f, t);
+        switch (k)
+        {
+            case KFreq:  setParam (b, "freq", juce::jlimit (10.0f, 20000.0f, get ("freq") * (float) std::pow (2.0, d))); break;
+            case KGain:  if (typeHasGain (t) && kind != ModeSpectral) setParam (b, "gain", juce::jlimit (-30.0f, 30.0f, get ("gain") + (float) d)); break;
+            case KQ:     setParam (b, "q", juce::jlimit (0.025f, 40.0f, get ("q") * (float) ratio)); break;
+            case KThr:   if (kind != ModeNormal) setParam (b, "thr", juce::jlimit (-80.0f, 0.0f, get ("thr") + (float) d)); break;
+            case KRange: if (kind != ModeNormal) setParam (b, "range", juce::jlimit (-30.0f, 30.0f, get ("range") + (float) d)); break;
+            case KAtt:   if (kind != ModeNormal) setParam (b, "att", juce::jlimit (0.1f, 500.0f, get ("att") * (float) ratio)); break;
+            case KRel:   if (kind != ModeNormal) setParam (b, "rel", juce::jlimit (5.0f, 3000.0f, get ("rel") * (float) ratio)); break;
+            default: break;
+        }
+    }
+}
+
+// shows what the bands have in common (blank when they differ) and hides controls no band in the group can use
+void BandPanel::refreshGroupControls()
+{
+    const auto& v = proc.apvts;
+    int type = -2, slope = -2, place = -2, dir = -2, mode = -2;
+    bool anyDyn = false, anyCut = false, anyGain = false, anyCanDyn = false, allSc = true, haveDyn = false;
+    auto merge = [] (int& acc, int x) { if (acc == -2) acc = x; else if (acc != x) acc = -1; };
+
+    for (int b : group)
+    {
+        auto get = [&v, b] (const char* n) { return v.getRawParameterValue (pid (b, n))->load(); };
+        const int t = (int) get ("type");
+        const int m = dynModeOf (get ("dyn") > 0.5f, get ("spec") > 0.5f, t);
+        const bool cut = t == LowCut || t == HighCut;
+        merge (type, t); merge (place, (int) get ("place")); merge (mode, m);
+        if (cut) merge (slope, (int) get ("slope"));
+        if (m != ModeNormal) { merge (dir, (int) get ("dir")); haveDyn = true; if (get ("sc") < 0.5f) allSc = false; }
+        anyDyn = anyDyn || m != ModeNormal;
+        anyCut = anyCut || cut;
+        anyGain = anyGain || (typeHasGain (t) && m != ModeSpectral);
+        anyCanDyn = anyCanDyn || typeHasGain (t);
+    }
+
+    typeBox.setSelectedId (type >= 0 ? type + 1 : 0, juce::dontSendNotification);
+    placeBox.setSelectedId (place >= 0 ? place + 1 : 0, juce::dontSendNotification);
+    slopeBox.setSelectedId (slope >= 0 ? slope + 1 : 0, juce::dontSendNotification);
+    dirBox.setSelectedId (dir >= 0 ? dir + 1 : 0, juce::dontSendNotification);
+    dynModeBox.setSelectedId (mode >= 0 ? mode + 1 : 0, juce::dontSendNotification);
+    enBtn.setToggleState (true, juce::dontSendNotification);
+    scBtn.setToggleState (haveDyn && allSc, juce::dontSendNotification);
+
+    const int sig = (anyDyn ? 1 : 0) | (anyCut ? 2 : 0) | (anyGain ? 4 : 0) | (anyCanDyn ? 8 : 0);
+    if (sig == groupSig) return;
+    groupSig = sig;
+    groupAnyDyn = anyDyn;
+    dynModeBox.setItemEnabled (ModeDynamic + 1, anyCanDyn);
+    dynModeBox.setItemEnabled (ModeSpectral + 1, anyCanDyn);
+    slopeBox.setVisible (anyCut);
+    dirBox.setVisible (anyDyn);
+    scBtn.setVisible (anyDyn);
+    gain.s.setVisible (anyGain);
+    gain.l.setVisible (anyGain);
+    for (auto* k : { &thr, &range, &att, &rel }) { k->s.setVisible (anyDyn); k->l.setVisible (anyDyn); }
+    resized();
+    repaint();
+}
+
 void BandPanel::paint (juce::Graphics& g)
 {
     const auto body = getLocalBounds().reduced (12, 10);
@@ -1098,7 +1338,7 @@ void BandPanel::paint (juce::Graphics& g)
     g.fillRoundedRectangle (r, 16.0f);
     g.setColour (juce::Colours::white.withAlpha (0.10f));
     g.drawRoundedRectangle (r.reduced (0.5f), 16.0f, 1.0f);
-    g.setColour (bandColour (band).withAlpha (0.8f));
+    g.setColour ((groupMode ? Look::gold : bandColour (band)).withAlpha (0.8f));
     g.drawLine (r.getX() + 34.0f, r.getY() + 1.0f, r.getRight() - 34.0f, r.getY() + 1.0f, 1.5f);
 }
 
@@ -1265,8 +1505,8 @@ private:
 class SettingsPanel : public juce::Component
 {
 public:
-    SettingsPanel (RajvikEQAudioProcessor& p, juce::Component& hostComp, std::function<void()> look, std::function<void (float)> scale)
-        : proc (p), host (hostComp), onLook (std::move (look)), onScale (std::move (scale)), customSw (juce::Colour(), juce::Colour(), 2)
+    SettingsPanel (RajvikEQAudioProcessor& p, juce::Component& hostComp, std::function<void()> look, std::function<void (float)> scale, std::function<void()> resetSizeFn)
+        : proc (p), host (hostComp), onLook (std::move (look)), onScale (std::move (scale)), onResetSize (std::move (resetSizeFn)), customSw (juce::Colour(), juce::Colour(), 2)
     {
         for (int i = 0; i < Look::numAccents; ++i)
         {
@@ -1289,7 +1529,7 @@ public:
         }
 
         scaleSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-        scaleSlider.setRange (60.0, 150.0, 5.0);
+        scaleSlider.setRange (40.0, 200.0, 5.0);
         scaleSlider.setValue ((double) Look::prefs.scale * 100.0, juce::dontSendNotification);
         scaleSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 56, 20);
         scaleSlider.setTextValueSuffix (" %");
@@ -1309,8 +1549,33 @@ public:
         notesA    = std::make_unique<BA> (proc.apvts, "notes", notesBtn);
         invertA   = std::make_unique<BA> (proc.apvts, "invert", invertBtn);
 
+        for (auto* b : { &resetColoursBtn, &resetSizeBtn, &resetAllBtn }) addAndMakeVisible (b);
+        resetColoursBtn.setTooltip ("Back to the default accent colour and background");
+        resetSizeBtn.setTooltip ("Back to the default window size (100 %)");
+        resetAllBtn.setTooltip ("Colours, size and all settings above back to default (bands are not touched)");
+        resetColoursBtn.onClick = [this] { Look::prefs.useCustom = false; Look::prefs.accent = 0; Look::prefs.theme = 0; changed(); };
+        resetSizeBtn.onClick = [this]
+        {
+            if (onResetSize) onResetSize();
+            scaleSlider.setValue (100.0, juce::dontSendNotification);
+        };
+        resetAllBtn.onClick = [this]
+        {
+            Look::prefs.useCustom = false; Look::prefs.accent = 0; Look::prefs.theme = 0;
+            changed();
+            if (onResetSize) onResetSize();
+            scaleSlider.setValue (100.0, juce::dontSendNotification);
+            for (const char* id : { "out_gain", "mode", "character", "os", "disp_range", "analyzer", "ana_view", "invert", "notes" })
+                if (auto* prm = proc.apvts.getParameter (id))
+                {
+                    prm->beginChangeGesture();
+                    prm->setValueNotifyingHost (prm->getDefaultValue());
+                    prm->endChangeGesture();
+                }
+        };
+
         refreshSelection();
-        setSize (320, 372);
+        setSize (320, 416);
     }
 
     void paint (juce::Graphics& g) override
@@ -1356,6 +1621,13 @@ public:
         y += 30;
         labels.push_back ({ "Character", { x0, y, 110, 24 } });
         charBox.setBounds (bx, y, bw, 24);
+        y += 40;
+        labels.push_back ({ "Reset to default", { x0, y, 200, 16 } });
+        y += 20;
+        const int rw = (getWidth() - 2 * x0 - 12) / 3;
+        resetColoursBtn.setBounds (x0, y, rw, 26);
+        resetSizeBtn.setBounds (x0 + rw + 6, y, rw, 26);
+        resetAllBtn.setBounds (x0 + 2 * (rw + 6), y, rw, 26);
     }
 
 private:
@@ -1406,6 +1678,8 @@ private:
     juce::Component& host;
     std::function<void()> onLook;
     std::function<void (float)> onScale;
+    std::function<void()> onResetSize;
+    juce::TextButton resetColoursBtn { "Colours" }, resetSizeBtn { "Size" }, resetAllBtn { "Reset all" };
     std::vector<std::unique_ptr<Swatch>> accentSw, themeSw;
     Swatch customSw;
     juce::Slider scaleSlider;
@@ -1430,12 +1704,13 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     root.resizedFn = [this] { layoutRoot(); };
     addAndMakeVisible (root);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
+    for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &osL, &osBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
                                                              &toolsBtn, &gearBtn, &analyzerBtn, &outL, &outSlider })
         root.addAndMakeVisible (c);
     root.addAndMakeVisible (panel);
 
     display.onSelect = [this] (int b) { panelOpen = true; panel.select (b); };
+    display.onMultiSelect = [this] { panelOpen = true; };   // placePanel() then switches the panel to group editing
     display.onBackgroundClick = [this] { panelOpen = false; };
     panel.onClose = [this] { panelOpen = false; };
     panel.onStep = [this] (int dir)
@@ -1449,6 +1724,11 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     };
 
     modeBox.addItemList (modeNames, 1);
+    osBox.addItemList (osNames, 1);
+    osBox.setTooltip ("Oversampling of the EQ bands: more accurate high frequencies, a few samples of latency. Natural Phase is always at least 2x. Not used in Linear Phase.");
+    osL.setJustificationType (juce::Justification::centredRight);
+    osL.setFont (juce::Font (juce::FontOptions (13.0f)));
+    osL.setText ("Oversampling", juce::dontSendNotification);
     outL.setJustificationType (juce::Justification::centredRight);
     outL.setFont (juce::Font (juce::FontOptions (13.0f)));
     outL.setText ("Output", juce::dontSendNotification);
@@ -1469,6 +1749,7 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     outSlider.setDoubleClickReturnValue (true, 0.0);
 
     modeA     = std::make_unique<CA> (p.apvts, "mode", modeBox);
+    osA       = std::make_unique<CA> (p.apvts, "os", osBox);
     analyzerA = std::make_unique<BA> (p.apvts, "analyzer", analyzerBtn);
     outA      = std::make_unique<SA> (p.apvts, "out_gain", outSlider);
 
@@ -1507,6 +1788,17 @@ void RajvikEQAudioProcessorEditor::applyLook()
     repaint();
 }
 
+void RajvikEQAudioProcessorEditor::resetSize()
+{
+    Look::prefs.scale = 1.0f;
+    Look::prefs.width = 1060;
+    Look::prefs.height = 600;
+    Look::prefs.save();
+    setResizeLimits (minW, minH, maxW, maxH);
+    setSize (1060, 600);
+    resized();
+}
+
 void RajvikEQAudioProcessorEditor::scaleChanged (float oldScale)
 {
     const float s = Look::prefs.scale;
@@ -1522,7 +1814,8 @@ void RajvikEQAudioProcessorEditor::showSettings()
     juce::Component::SafePointer<RajvikEQAudioProcessorEditor> safe (this);
     auto content = std::make_unique<SettingsPanel> (proc, root,
         [safe] { if (safe != nullptr) safe->applyLook(); },
-        [safe] (float old) { if (safe != nullptr) safe->scaleChanged (old); });
+        [safe] (float old) { if (safe != nullptr) safe->scaleChanged (old); },
+        [safe] { if (safe != nullptr) safe->resetSize(); });
     juce::CallOutBox::launchAsynchronously (std::move (content), root.getLocalArea (&gearBtn, gearBtn.getLocalBounds()), &root);
 }
 
@@ -1558,7 +1851,18 @@ void RajvikEQAudioProcessorEditor::showPresetMenu()
 {
     juce::PopupMenu m, fm, um, dm;
     const auto& fac = Presets::factory();
-    for (int i = 0; i < (int) fac.size(); ++i) fm.addItem (1000 + i, fac[(size_t) i].name, true, fac[(size_t) i].name == Presets::presetName (proc));
+    {
+        std::vector<std::pair<juce::String, juce::PopupMenu>> cats;   // factory presets grouped by category
+        for (int i = 0; i < (int) fac.size(); ++i)
+        {
+            const auto& f = fac[(size_t) i];
+            size_t ci = 0;
+            while (ci < cats.size() && cats[ci].first != f.category) ++ci;
+            if (ci == cats.size()) cats.push_back ({ f.category, juce::PopupMenu() });
+            cats[ci].second.addItem (1000 + i, f.name, true, f.name == Presets::presetName (proc));
+        }
+        for (auto& cat : cats) fm.addSubMenu (cat.first, cat.second);
+    }
     const auto files = Presets::userFiles();
     if (files.isEmpty()) um.addItem (-1, "(none yet - use Save)", false);
     for (int i = 0; i < files.size(); ++i)
@@ -1628,25 +1932,38 @@ void RajvikEQAudioProcessorEditor::promptSave()
 void RajvikEQAudioProcessorEditor::placePanel()
 {
     const int b = display.selected;
-    const bool show = panelOpen && display.isBandEnabled (b);
+    const auto grp = display.groupBands();
+    const bool multi = grp.size() > 1;
+    const bool show = panelOpen && (multi || display.isBandEnabled (b));
     panel.setVisible (show);
     if (! show) return;
+
+    if (multi) panel.setGroup (grp);                         // several bands: every knob changes all of them by the same amount
+    else if (panel.isGroupMode()) panel.select (b);          // selection shrank back to one band
     panel.update();
 
+    // the panel shrinks with a small window instead of being cut off
     const auto db = display.getBounds();
-    const int pw = juce::jmin (panel.idealWidth(), db.getWidth() - 8), ph = BandPanel::totalHeight;
-    const int x = db.getX() + (db.getWidth() - pw) / 2;
-    const int yBottom = db.getBottom() - ph - 20 - (proc.apvts.getRawParameterValue ("notes")->load() > 0.5f ? 44 : 0), yTop = db.getY() + 6;
+    const int pw = panel.idealWidth(), ph = BandPanel::totalHeight;
+    const float f = juce::jlimit (0.45f, 1.0f, juce::jmin ((float) (db.getWidth() - 8) / (float) pw, (float) db.getHeight() * 0.62f / (float) ph));
+    panel.setTransform (juce::AffineTransform::scale (f));
+    const float vw = (float) pw * f, vh = (float) ph * f;
+    const int x = db.getX() + juce::roundToInt (((float) db.getWidth() - vw) * 0.5f);
+    const int yBottom = db.getBottom() - juce::roundToInt (vh) - 20 - (proc.apvts.getRawParameterValue ("notes")->load() > 0.5f ? 44 : 0), yTop = db.getY() + 6;
 
-    const auto np = display.getNodePos (b) + db.getPosition().toFloat();
-    const juce::Rectangle<float> bottomR ((float) x, (float) yBottom, (float) pw, (float) ph);
-    const juce::Rectangle<float> topR ((float) x, (float) yTop, (float) pw, (float) ph);
-    if (bottomR.expanded (24.0f).contains (np))   panelOnTop = true;
-    else if (topR.expanded (24.0f).contains (np)) panelOnTop = false;
+    const juce::Rectangle<float> bottomR ((float) x, (float) yBottom, vw, vh);
+    const juce::Rectangle<float> topR ((float) x, (float) yTop, vw, vh);
+    auto covers = [&] (const juce::Rectangle<float>& r)   // does the panel hide any node of the selection?
+    {
+        const auto area = r.expanded (24.0f);
+        if (multi) { for (int g : grp) if (area.contains (display.getNodePos (g) + db.getPosition().toFloat())) return true; return false; }
+        return area.contains (display.getNodePos (b) + db.getPosition().toFloat());
+    };
+    if (covers (bottomR))   panelOnTop = true;
+    else if (covers (topR)) panelOnTop = false;
 
     panel.setBounds (x, panelOnTop ? yTop : yBottom, pw, ph);
 }
-
 
 void RajvikEQAudioProcessorEditor::paint (juce::Graphics& g)
 {
@@ -1699,10 +2016,12 @@ void RajvikEQAudioProcessorEditor::layoutRoot()
     toolsBtn.setBounds (hdr.getRight() - 38 - 6 - 78, 5, 78, 24);
 
     auto bot = r.removeFromBottom (bottomH).reduced (8, 2);
-    modeBox.setBounds (bot.removeFromLeft (130));  bot.removeFromLeft (10);
-    analyzerBtn.setBounds (bot.removeFromLeft (96));
-    outSlider.setBounds (bot.removeFromRight (230));
-    outL.setBounds (bot.removeFromRight (52));
+    modeBox.setBounds (bot.removeFromLeft (124));  bot.removeFromLeft (6);
+    osL.setBounds (bot.removeFromLeft (88));
+    osBox.setBounds (bot.removeFromLeft (58));  bot.removeFromLeft (8);
+    analyzerBtn.setBounds (bot.removeFromLeft (92));
+    outSlider.setBounds (bot.removeFromRight (juce::jlimit (90, 300, bot.getWidth() - 52)));
+    outL.setBounds (bot.removeFromRight (50));
 
     auto stripArea = r.removeFromRight (stripW);
     display.setBounds (r);

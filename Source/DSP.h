@@ -127,12 +127,16 @@ inline void design (BandDesign& d, int type, double f, double gainDb, double q, 
     }
 }
 
+// |H(e^jw)|^2 of one biquad. Closed form in phi = sin^2(w/2): one sin() instead of two complex exponentials
+// (the editor evaluates this thousands of times per frame) and no cancellation error at very low frequencies.
 inline double magSq (const Coeffs& c, double w)
 {
-    const std::complex<double> z1 = std::polar (1.0, -w), z2 = std::polar (1.0, -2.0 * w);
-    const std::complex<double> num = c.b0 + c.b1 * z1 + c.b2 * z2;
-    const std::complex<double> den = 1.0 + c.a1 * z1 + c.a2 * z2;
-    return std::norm (num) / std::max (std::norm (den), 1e-30);
+    const double s = std::sin (0.5 * w), phi = s * s;
+    auto f = [phi] (double x0, double x1, double x2)
+    {
+        return (x0 + x1 + x2) * (x0 + x1 + x2) - 4.0 * (x0 * x1 + 4.0 * x0 * x2 + x1 * x2) * phi + 16.0 * x0 * x2 * phi * phi;
+    };
+    return std::max (f (c.b0, c.b1, c.b2), 0.0) / std::max (f (1.0, c.a1, c.a2), 1e-30);
 }
 
 inline double designDb (const BandDesign& d, double f, double fs)

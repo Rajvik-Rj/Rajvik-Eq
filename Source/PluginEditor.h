@@ -9,6 +9,7 @@ public:
     std::function<void (int)> onSelect;
     std::function<void()> onSketchDone;
     std::function<void()> onBackgroundClick;
+    std::function<void()> onMultiSelect;   // several bands selected: the band panel switches to group (relative) editing
     void selectBand (int b) { select (b); }
     int selected = 0;
     bool sketchMode = false;
@@ -106,7 +107,9 @@ public:
     std::function<void()> onClose;
     std::function<void (int)> onStep;
 
-    void select (int band);
+    void select (int band);                         // edit one band
+    void setGroup (const std::vector<int>& bands);  // edit several bands at once: knobs are relative (+/- dB, shift in octaves, x factors)
+    bool isGroupMode() const { return groupMode; }
     void update();            // re-layout when the band type / dynamic state changes
     int idealWidth() const;   // component width including the soft shadow margin
     bool hitTest (int x, int y) override { return getLocalBounds().reduced (12, 10).contains (x, y); }
@@ -122,14 +125,27 @@ private:
         void place (juce::Rectangle<int> r);
     };
 
+    enum { KFreq, KGain, KQ, KThr, KRange, KAtt, KRel, numKnobs };
+    Knob& knobRef (int k) { Knob* a[] = { &freq, &gain, &q, &thr, &range, &att, &rel }; return *a[k]; }
+    void configureKnobsForGroup();
+    void refreshGroupControls();
+    void groupKnobChanged (int k);
+    void groupGesture (int k, bool begin);
+    void setParam (int b, const char* name, float v);
+    std::vector<int> targets() const;
+
     int  dynMode() const;     // ModeNormal / ModeDynamic / ModeSpectral as the DSP sees it
-    bool dynOn() const { return dynMode() != RP::ModeNormal; }
+    bool dynOn() const { return groupMode ? groupAnyDyn : dynMode() != RP::ModeNormal; }
     bool isCut() const;
     bool canDynamic() const;  // only gain type bands can be dynamic
     void setDynMode (int mode);
 
     RajvikEQAudioProcessor& proc;
     int band = 0;
+    bool groupMode = false, groupAnyDyn = false;
+    int groupSig = -1;
+    std::vector<int> group;
+    double lastVal[numKnobs] {};
     int lastMode = -1;
     bool lastCut = false, lastCanDyn = true;
     juce::Label numLabel;
@@ -199,12 +215,13 @@ private:
     void showToolsMenu();
     void showSettings();
     void applyLook();
+    void resetSize();
     void scaleChanged (float oldScale);
     void stepPreset (int dir);
     void promptSave();
 
     static constexpr int headerH = 34, bottomH = 26, stripW = 100;
-    static constexpr int minW = 1000, minH = 520, maxW = 2400, maxH = 1500;   // unscaled units
+    static constexpr int minW = 640, minH = 400, maxW = 3200, maxH = 2000;   // unscaled units
     RajvikEQAudioProcessor& proc;
     RajvikLAF laf;
     RootView root;
@@ -213,8 +230,8 @@ private:
     BandPanel panel;
     bool panelOnTop = false, panelOpen = false;
 
-    juce::ComboBox modeBox;
-    juce::Label outL;
+    juce::ComboBox modeBox, osBox;
+    juce::Label outL, osL;
     juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" }, toolsBtn;
     GearButton gearBtn;
     juce::ToggleButton analyzerBtn { "Analyzer" };
@@ -223,7 +240,7 @@ private:
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<CA> modeA;
+    std::unique_ptr<CA> modeA, osA;
     std::unique_ptr<BA> analyzerA;
     std::unique_ptr<SA> outA;
 

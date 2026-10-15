@@ -35,7 +35,7 @@ struct Prefs
     int accent = 0, theme = 0;
     bool useCustom = false;
     juce::uint32 custom = 0xfff9c23c;
-    float scale = 1.0f;          // GUI size: 0.6 .. 1.5
+    float scale = 1.0f;          // GUI size: 0.4 .. 2.0
     int width = 1060, height = 600;   // window size in unscaled units
 
     static juce::File file()
@@ -51,9 +51,9 @@ struct Prefs
             theme     = juce::jlimit (0, numThemes - 1, xml->getIntAttribute ("theme", 0));
             useCustom = xml->getBoolAttribute ("useCustom", false);
             custom    = (juce::uint32) xml->getStringAttribute ("custom", "fff9c23c").getHexValue64();
-            scale     = juce::jlimit (0.6f, 1.5f, (float) xml->getDoubleAttribute ("scale", 1.0));
-            width     = juce::jlimit (1000, 2400, xml->getIntAttribute ("width", 1060));
-            height    = juce::jlimit (520, 1500, xml->getIntAttribute ("height", 600));
+            scale     = juce::jlimit (0.4f, 2.0f, (float) xml->getDoubleAttribute ("scale", 1.0));
+            width     = juce::jlimit (640, 3200, xml->getIntAttribute ("width", 1060));
+            height    = juce::jlimit (400, 2000, xml->getIntAttribute ("height", 600));
         }
     }
 
