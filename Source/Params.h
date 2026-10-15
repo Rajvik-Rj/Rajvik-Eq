@@ -15,6 +15,11 @@ inline const juce::StringArray placementNames { "Stereo", "Left", "Right", "Mid"
 inline const juce::StringArray dirNames       { "Above", "Below" };
 inline const juce::StringArray modeNames      { "Zero Latency", "Natural Phase", "Linear Phase" };
 inline const juce::StringArray osNames        { "Off", "2x", "4x", "8x" };
+// analyzer settings (same idea as the Pro-Q analyzer panel)
+inline const juce::StringArray anaRangeNames   { "60 dB", "90 dB", "120 dB" };
+inline const juce::StringArray anaResNames     { "Low", "Medium", "High", "Maximum" };          // FFT 2048 / 4096 / 8192 / 16384
+inline const juce::StringArray anaSpeedNames   { "Very slow", "Slow", "Medium", "Fast", "Very fast" };   // release speed
+inline const juce::StringArray anaTiltNames    { "0 dB/oct", "1.5 dB/oct", "3 dB/oct", "4.5 dB/oct", "6 dB/oct" };
 inline const juce::StringArray charNames      { "Clean", "Subtle", "Warm" };
 inline const juce::StringArray anaViewNames   { "Pre", "Post", "Pre + Post" };
 inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "30 dB" };
@@ -113,6 +118,11 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "disp_range", 1 }, "Display Range", rangeNames, 2));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "analyzer", 1 },   "Analyzer", true));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_view", 1 },   "Analyzer View", anaViewNames, 2));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_range", 1 },  "Analyzer Range", anaRangeNames, 1));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_res", 1 },    "Analyzer Resolution", anaResNames, 2));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_speed", 1 },  "Analyzer Speed", anaSpeedNames, 2));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_tilt", 1 },   "Analyzer Tilt", anaTiltNames, 3));
+    layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "ana_freeze", 1 }, "Analyzer Freeze", false));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "invert", 1 },     "Phase Invert", false));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "notes", 1 },      "Piano View", false));
     return layout;

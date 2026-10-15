@@ -15,11 +15,11 @@ std::vector<RajvikEQAudioProcessor*> RajvikEQAudioProcessor::getInstances()
     const juce::ScopedLock sl (regLock);
     return registry;
 }
-bool RajvikEQAudioProcessor::snapshotPost (RajvikEQAudioProcessor* o, float* out)
+bool RajvikEQAudioProcessor::snapshotPost (RajvikEQAudioProcessor* o, float* outL, float* outR, int n)
 {
     const juce::ScopedLock sl (regLock);
     if (std::find (registry.begin(), registry.end(), o) == registry.end()) return false;
-    o->postAnalyzer.snapshot (out);
+    o->postAnalyzer.snapshot (outL, outR, juce::jlimit (1, Analyzer::size, n));
     return true;
 }
 bool RajvikEQAudioProcessor::copySettingsFrom (RajvikEQAudioProcessor* o)
@@ -87,6 +87,10 @@ void RajvikEQAudioProcessor::prepareToPlay (double sr, int block)
 {
     conv.prepare ({ sr, (juce::uint32) block, 2 });
     maxBlock = juce::jmax (1, block);
+    soloBuf.setSize (16, maxBlock);
+    soloBuf.clear();
+    soloMix = 0.0; soloKeyBand = -1; soloKeyType = -1;
+    for (auto& s : soloF) s.reset();
     for (auto& o : os)
     {
         o->initProcessing ((size_t) maxBlock);
@@ -359,6 +363,49 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     preAnalyzer.push (L, R, n);
 
+    // ---- band solo: listen to the region of one band (band-pass at its frequency / Q, low-pass for low shelf / cut, high-pass for high shelf / cut) ----
+    const int soloIdx = soloBand.load();
+    const bool soloOn = soloIdx >= 0 && soloIdx < numBands && readBand (soloIdx).en;
+    const bool soloWork = soloOn || soloMix > 0.0;   // keep going while it fades out
+    if (soloWork)
+    {
+        if (soloBuf.getNumSamples() < n) soloBuf.setSize (16, n, false, false, true);
+        for (int c = 0; c < nCh; ++c) soloBuf.copyFrom (c, 0, chs[c], n);   // the input, before any EQ
+        if (soloOn)
+        {
+            const auto sv = readBand (soloIdx);
+            const double sf = juce::jlimit (5.0, getSampleRate() * 0.49, (double) sv.freq), sq = juce::jmax (0.1, (double) sv.q);
+            if (soloKeyBand != soloIdx) { for (auto& s : soloF) s.reset(); soloKeyBand = soloIdx; soloKeyType = -1; }
+            if (soloKeyType != sv.type || soloKeyF != sf || soloKeyQ != sq)
+            {
+                const bool low = sv.type == LowShelf || sv.type == LowCut, high = sv.type == HighShelf || sv.type == HighCut;
+                const auto sc = low ? detail::lp2 (sf, 0.7071, getSampleRate()) : high ? detail::hp2 (sf, 0.7071, getSampleRate()) : detail::bandpass (sf, sq, getSampleRate());
+                for (auto& s : soloF) s.c = sc;
+                soloKeyType = sv.type; soloKeyF = sf; soloKeyQ = sq;
+            }
+            soloPlace = sv.place;
+        }
+        float* sb[16];
+        for (int c = 0; c < nCh; ++c) sb[c] = soloBuf.getWritePointer (c);
+        if (nCh > 1 && (soloPlace == Left || soloPlace == Right))
+        {
+            for (int i = 0; i < n; ++i) { const float x = (float) soloF[0].process ((double) (soloPlace == Left ? sb[0][i] : sb[1][i])); sb[0][i] = x; sb[1][i] = x; }
+        }
+        else if (nCh > 1 && soloPlace == Mid)
+        {
+            for (int i = 0; i < n; ++i) { const float x = (float) soloF[0].process (0.5 * ((double) sb[0][i] + (double) sb[1][i])); sb[0][i] = x; sb[1][i] = x; }
+        }
+        else if (nCh > 1 && soloPlace == Side)
+        {
+            for (int i = 0; i < n; ++i) { const float x = (float) soloF[1].process (0.5 * ((double) sb[0][i] - (double) sb[1][i])); sb[0][i] = x; sb[1][i] = -x; }
+        }
+        else
+        {
+            for (int c = 0; c < nCh; ++c)
+                for (int i = 0; i < n; ++i) sb[c][i] = (float) soloF[c].process ((double) sb[c][i]);
+        }
+    }
+
     const bool linear = linearActive.load() && nCh == 2;
     const int stage = nCh == 2 ? osStage.load() : 0;
     const bool spectral = spectralActive.load() && nCh == 2;
@@ -432,6 +479,16 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         spec.process (L, R, scL, scR, n);
         for (int b = 0; b < numBands; ++b)
             if (cfg[(size_t) b].active) dynDb[(size_t) b].store (spec.dynAt[(size_t) b]);
+    }
+
+    if (soloWork)   // crossfade to / from the solo signal (10 ms)
+    {
+        const double target = soloOn ? 1.0 : 0.0, step = 1.0 / (0.010 * getSampleRate());
+        for (int i = 0; i < n; ++i)
+        {
+            soloMix = target > soloMix ? juce::jmin (target, soloMix + step) : juce::jmax (target, soloMix - step);
+            for (int c = 0; c < nCh; ++c) chs[c][i] += (float) soloMix * (soloBuf.getReadPointer (c)[i] - chs[c][i]);
+        }
     }
 
     const int mode = (int) apvts.getRawParameterValue ("character")->load();

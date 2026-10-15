@@ -52,9 +52,16 @@ private:
     float yToGain (float y) const;
     float dispRange() const;
     void timerCallback() override;
-    void updateSpectrum (const Analyzer&, std::array<float, 2049>&);
-    void drawSpectrum (juce::Graphics&, const std::array<float, 2049>&, juce::Colour, float alpha, bool filled);
-    float spectrumDbAt (const std::array<float, 2049>&, float x) const;
+    using SpecArr = std::vector<float>;   // dBFS per FFT bin (smoothed)
+    void updateSpectrum (const Analyzer&, SpecArr&);
+    void computeSpectrum (SpecArr&);
+    void configureAnalyzer();
+    void toolSpectrum();
+    void drawSpectrum (juce::Graphics&, const SpecArr&, juce::Colour, float alpha, bool filled);
+    float spectrumDbAt (const SpecArr&, float x) const;           // incl. tilt
+    float binsDbAt (const float* bins, int fftSize, float x) const;   // no tilt
+    float anaRange() const;
+    float anaTilt() const;
 
     RajvikEQAudioProcessor& proc;
     bool dragging = false, marqueeing = false;
@@ -74,16 +81,14 @@ private:
     std::array<double, 2049> refAcc {}, srcAcc {};
     std::vector<juce::Point<float>> sketch;
     RajvikEQAudioProcessor* overlayProc = nullptr;
-    std::array<float, 2049> overlaySm {};
     void finishSketch();
     void fitToTarget (std::vector<float> residual, int maxBands);
     int freeBand() const;
-    void spectrumFromSnap (std::array<float, 2049>&);
-    juce::dsp::FFT fft { 12 };
-    juce::dsp::WindowingFunction<float> window { 4096, juce::dsp::WindowingFunction<float>::hann };
-    std::array<float, 2049> preSm {}, postSm {};
-    std::array<float, 4096> snap {};
-    std::array<float, 8192> fftData {};
+    SpecArr preSm, postSm, overlaySm;
+    std::vector<float> snapL, snapR, fftData, powBuf, win, toolWin;
+    std::unique_ptr<juce::dsp::FFT> fft;
+    juce::dsp::FFT toolFft { 12 };   // fixed 4096 point FFT for Auto Peaks / EQ Match
+    int specN = 0;                   // FFT size of the display analyzer (2048 .. 16384)
 };
 
 class ScaleStrip : public juce::Component, private juce::Timer
@@ -150,7 +155,7 @@ private:
     bool lastCut = false, lastCanDyn = true;
     juce::Label numLabel;
     juce::ToggleButton enBtn, scBtn { "Sidechain" };
-    juce::TextButton closeBtn, prevBtn, nextBtn;
+    juce::TextButton closeBtn, prevBtn, nextBtn, soloBtn { "Solo" };
     juce::ComboBox typeBox, slopeBox, placeBox, dirBox, dynModeBox;
     Knob freq, gain, q, thr, range, att, rel;
 
