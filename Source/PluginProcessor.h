@@ -8,20 +8,20 @@
 class Analyzer
 {
 public:
-    static constexpr int size = 32768;
+    static constexpr int size = 16384;
     void push (const float* l, const float* r, int n)
     {
         int w = wpos.load (std::memory_order_relaxed);
         for (int i = 0; i < n; ++i) { ringL[(size_t) w] = l[i]; ringR[(size_t) w] = r[i]; w = (w + 1) & (size - 1); }
         wpos.store (w, std::memory_order_release);
     }
-    // n samples (n + delay <= size), oldest first, ending `delay` samples before the newest one
-    void snapshot (float* outL, float* outR, int n, int delay = 0) const
+    // the newest n samples (n <= size), oldest first
+    void snapshot (float* outL, float* outR, int n) const
     {
         const int w = wpos.load (std::memory_order_acquire);
         for (int i = 0; i < n; ++i)
         {
-            const size_t idx = (size_t) ((w - delay - n + i) & (size - 1));
+            const size_t idx = (size_t) ((w - n + i) & (size - 1));
             outL[i] = ringL[idx];
             outR[i] = ringR[idx];
         }
@@ -73,7 +73,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     Analyzer preAnalyzer, postAnalyzer;
     std::array<std::atomic<float>, RP::numBands> dynDb;
-    std::atomic<int> latencyNow { 0 };   // reported plug-in latency in samples (the editor aligns the input spectrum with the output)
+    std::array<std::atomic<float>, RP::numBands> detDb;   // live detector level (dBFS) of every dynamic / spectral band, for the threshold display
     std::atomic<int> soloBand { -1 };   // band being soloed (-1 = none); not saved with the project, set from the editor
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };   // output peaks for the level meters
 
@@ -90,7 +90,7 @@ private:
         RP::BandDesign design;
         RP::Biquad f[16][RP::maxSections];
         RP::Biquad det;
-        double env = 0.0, appliedDyn = 0.0, sF = 0.0, sG = 0.0, sQ = 1.0, mix = 0.0;
+        double env = 0.0, env2 = 0.0, envDb = -120.0, appliedDyn = 0.0, sF = 0.0, sG = 0.0, sQ = 1.0, mix = 0.0;
         bool smInit = false;
         int keyType = -1, keySlope = -1;
         double keyFreq = 0, keyGain = 1e9, keyQ = 0, keyDF = 0, keyDQ = 0, keyFs = 0, keyDFs = 0;
@@ -98,7 +98,7 @@ private:
         void reset()
         {
             for (auto& ch : f) for (auto& s : ch) s.reset();
-            det.reset(); env = 0.0; appliedDyn = 0.0; keyType = -1; keyDF = 0; smInit = false;
+            det.reset(); env = 0.0; env2 = 0.0; envDb = -120.0; appliedDyn = 0.0; keyType = -1; keyDF = 0; smInit = false;
         }
     };
 

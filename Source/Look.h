@@ -52,7 +52,7 @@ struct Prefs
             useCustom = xml->getBoolAttribute ("useCustom", false);
             custom    = (juce::uint32) xml->getStringAttribute ("custom", "fff9c23c").getHexValue64();
             scale     = juce::jlimit (0.4f, 2.0f, (float) xml->getDoubleAttribute ("scale", 1.0));
-            width     = juce::jlimit (720, 3200, xml->getIntAttribute ("width", 1060));
+            width     = juce::jlimit (640, 3200, xml->getIntAttribute ("width", 1060));
             height    = juce::jlimit (400, 2000, xml->getIntAttribute ("height", 600));
         }
     }

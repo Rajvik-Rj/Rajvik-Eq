@@ -119,11 +119,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "analyzer", 1 },   "Analyzer", true));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_view", 1 },   "Analyzer View", anaViewNames, 2));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_range", 1 },  "Analyzer Range", anaRangeNames, 1));
-    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_res", 1 },    "Analyzer Resolution", anaResNames, 1));
+    layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_res", 1 },    "Analyzer Resolution", anaResNames, 2));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_speed", 1 },  "Analyzer Speed", anaSpeedNames, 2));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { "ana_tilt", 1 },   "Analyzer Tilt", anaTiltNames, 3));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "ana_freeze", 1 }, "Analyzer Freeze", false));
-    layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "ana_peaks", 1 },  "Analyzer Peak Labels", true));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "invert", 1 },     "Phase Invert", false));
     layout.add (std::make_unique<AudioParameterBool>   (ParameterID { "notes", 1 },      "Piano View", false));
     return layout;

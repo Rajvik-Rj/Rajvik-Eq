@@ -47,6 +47,7 @@ RajvikEQAudioProcessor::RajvikEQAudioProcessor()
       apvts (*this, nullptr, "STATE", createLayout())
 {
     for (auto& d : dynDb) d.store (0.0f);
+    for (auto& d : detDb) d.store (-120.0f);
     for (int i = 0; i < 3; ++i)   // created once (never replaced) so the editor / timer can always read them
         os[(size_t) i] = std::make_unique<juce::dsp::Oversampling<float>> (2, (size_t) (i + 1), juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true);
     for (int b = 0; b < numBands; ++b)
@@ -140,7 +141,6 @@ void RajvikEQAudioProcessor::updateFlags()
     spectralActive = sp;
     const int osLat = (stage > 0 && os[(size_t) (stage - 1)] != nullptr) ? (int) std::lround (os[(size_t) (stage - 1)]->getLatencyInSamples()) : 0;
     const int lat = (lin ? irLen / 2 : 0) + osLat + (sp ? SpectralStage::N : 0);
-    latencyNow = lat;
     if (lat != getLatencySamples()) setLatencySamples (lat);
 }
 
@@ -222,6 +222,7 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         auto v = readBand (b);
         auto& s = bands[(size_t) b];
         dynDb[(size_t) b].store (0.0f);
+        detDb[(size_t) b].store (-120.0f);
         if (modeOf (v) == ModeSpectral) v.gain = 0.0f;   // a Spectral band carries no static EQ gain: it only does spectral processing
 
         // In linear phase mode the FIR handles static Stereo/Left/Right bands; dynamic and Mid/Side
@@ -235,8 +236,6 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         if (! s.wasOn) { s.reset(); s.mix = 0.0; s.wasOn = true; }
 
         if (! dynamic) s.appliedDyn = 0.0;
-        const double ac = std::exp (-1.0 / (0.001 * juce::jmax (0.1f, v.att) * fs));
-        const double rc = std::exp (-1.0 / (0.001 * juce::jmax (1.0f, v.rel) * fs));
 
         auto casc = [&s] (int ch, double x) { for (int k = 0; k < s.design.n; ++k) x = s.f[ch][k].process (x); return x; };
 
@@ -270,6 +269,11 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
 
             if (dynamic)
             {
+                // RMS detector: band-pass -> mean square (two smoothing poles, fast enough for the band's frequency) -> level in dBFS
+                // (a full scale sine reads 0 dB, noise reads its sine-equivalent level). The Spectral Dynamic stage measures the very same
+                // quantity from its FFT, so one threshold value means the same thing in Dynamic and in Spectral mode.
+                const double tau = juce::jlimit (0.0003, 0.03, 0.45 / juce::jmax (20.0, (double) v.freq));
+                const double cs = 1.0 - std::exp (-1.0 / (tau * fs));
                 for (int i = 0; i < len; ++i)
                 {
                     // detector input: the main signal, or the sidechain input when this band uses it (silence if none is connected)
@@ -284,16 +288,22 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
                         case Side:  in = 0.5 * (l - r); break;
                         default:    in = 0.5 * (l + r); break;   // Stereo / Mid
                     }
-                    const double a = std::abs (s.det.process (in));
-                    s.env = a + (a > s.env ? ac : rc) * (s.env - a);
+                    const double y = s.det.process (in);
+                    s.env  += cs * (y * y - s.env);
+                    s.env2 += cs * (s.env - s.env2);
                 }
-                // env follows the rectified signal (mean of |sine| = 2/pi of its peak): +3.9 dB so a 0 dBFS sine reads 0 dB
-                const float lvl = 20.0f * std::log10 ((float) s.env + 1.0e-6f) + 3.92f;
+                const double lvlInst = 10.0 * std::log10 (2.0 * s.env2 + 1.0e-12);   // sine of amplitude A: mean square A^2/2 -> A^2 -> 20 log A
+                // attack / release act on the level in dB (one step per sub-block of len samples)
+                const double ca = 1.0 - std::exp (-(double) len / (0.001 * juce::jmax (0.1f, v.att) * fs));
+                const double cr = 1.0 - std::exp (-(double) len / (0.001 * juce::jmax (1.0f, v.rel) * fs));
+                s.envDb += (lvlInst > s.envDb ? ca : cr) * (lvlInst - s.envDb);
+                const float lvl = (float) s.envDb;
                 const float x = juce::jlimit (0.0f, 1.0f, (lvl - v.thr) / 12.0f + 0.5f);
                 const float sm = x * x * (3.0f - 2.0f * x);
                 s.appliedDyn = (double) v.range * (double) (v.dir == 0 ? sm : 1.0f - sm);
                 ensureDesign (s, v, fs);
                 dynDb[(size_t) b].store ((float) s.appliedDyn);
+                detDb[(size_t) b].store (lvl);
             }
 
             switch (v.place)
@@ -474,12 +484,12 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
             const auto v = readBand (b);
             auto& c = cfg[(size_t) b];
             c.active = v.en && modeOf (v) == ModeSpectral;
-            c.sc = v.sc; c.above = v.dir == 0; c.freq = v.freq; c.q = v.q; c.thr = v.thr; c.range = v.range; c.att = v.att; c.rel = v.rel;
+            c.sc = v.sc; c.place = v.place; c.above = v.dir == 0; c.freq = v.freq; c.q = v.q; c.thr = v.thr; c.range = v.range; c.att = v.att; c.rel = v.rel;
         }
         spec.setBands (cfg);
         spec.process (L, R, scL, scR, n);
         for (int b = 0; b < numBands; ++b)
-            if (cfg[(size_t) b].active) dynDb[(size_t) b].store (spec.dynAt[(size_t) b]);
+            if (cfg[(size_t) b].active) { dynDb[(size_t) b].store (spec.dynAt[(size_t) b]); detDb[(size_t) b].store (spec.lvlAt[(size_t) b]); }
     }
 
     if (soloWork)   // crossfade to / from the solo signal (10 ms)
