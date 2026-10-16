@@ -80,3 +80,11 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - **Accuracy:** low frequencies are interpolated without overshoot, high frequencies use a power average over about 3 pixels; a peak is drawn at the frequency where it really is. Only the shown spectrum (Pre or Post) is calculated, the analyzer uses no CPU when switched off.
 - Auto Peaks and EQ Match keep their own fixed 4096 point analysis, independent of the resolution setting.
 - Note: broadband noise reads about 3 dB lower for every higher resolution step (narrower bins); tones keep their level.
+
+## v7 (final) changes
+- Analyzer rebuilt as a multi-resolution analyzer: long FFT for the bass, a 4x shorter FFT for mids/highs, cross-faded by frequency. It now follows the sound with almost no delay.
+- Analyzer smoothing uses the real frame time, display runs at 60 fps.
+- Grid and EQ curves are cached as images, the band panel shadow is cached: much lower CPU while audio plays.
+- Preset section ([<] name [>] Save) moved to the right, next to Tools and the settings icon.
+- Piano button added to the bottom bar next to Oversampling / Analyzer.
+- The band panel (all knobs: Freq, Gain, Q, dynamics ...) now scales with the window size, both smaller and bigger.
