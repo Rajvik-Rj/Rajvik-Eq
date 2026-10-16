@@ -18,7 +18,8 @@ EQDisplay::EQDisplay (RajvikEQAudioProcessor& p) : proc (p)
     toolWin.resize (4096);
     for (int i = 0; i < 4096; ++i) toolWin[(size_t) i] = 1.0f - std::cos (juce::MathConstants<float>::twoPi * (float) i / 4095.0f);
     configureAnalyzer();
-    startTimerHz (60);
+    setOpaque (true);   // the display paints its whole area itself (no parent repaint behind it every frame)
+    startTimerHz (40);
 }
 
 float EQDisplay::dispRange() const
@@ -35,6 +36,10 @@ float EQDisplay::anaTilt() const
 {
     static const float t[] = { 0.0f, 1.5f, 3.0f, 4.5f, 6.0f };
     return t[juce::jlimit (0, 4, (int) apvtsVal ("ana_tilt"))];
+}
+float EQDisplay::anaY (float db) const
+{
+    return (float) getHeight() * (1.0f - juce::jlimit (0.0f, 1.0f, (db + rangeDb) / rangeDb));   // 0 dBFS at the top, -range at the bottom
 }
 float EQDisplay::freqToX (float f) const { return (float) getWidth() * std::log (juce::jmax (f, 10.0f) / 10.0f) / std::log (2000.0f); }
 float EQDisplay::xToFreq (float x) const { return 10.0f * std::pow (2000.0f, x / (float) getWidth()); }
@@ -107,35 +112,28 @@ int EQDisplay::hitTest (juce::Point<float> p) const
     return best;
 }
 
-void EQDisplay::initSpec (SpecArr& s) const
-{
-    s.lo.assign ((size_t) specN / 2 + 1, -120.0f);
-    s.hi.assign ((size_t) fastN / 2 + 1, -120.0f);
-    s.cLo.assign ((size_t) specN / 2 + 2, 0.0);
-    s.cHi.assign ((size_t) fastN / 2 + 2, 0.0);
-}
-
 void EQDisplay::configureAnalyzer()
 {
-    static const int sizes[] = { 2048, 4096, 8192, 16384 };
-    const int n = sizes[juce::jlimit (0, 3, (int) apvtsVal ("ana_res"))];
-    if (n == specN) return;
-    specN = n;
-    fastN = juce::jmax (1024, n / 4);
-    fft     = std::make_unique<juce::dsp::FFT> (juce::findHighestSetBit (n));
-    fftFast = std::make_unique<juce::dsp::FFT> (juce::findHighestSetBit (fastN));
-    win.resize ((size_t) n);
-    for (int i = 0; i < n; ++i) win[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) n);   // Hann
-    winFast.resize ((size_t) fastN);
-    for (int i = 0; i < fastN; ++i) winFast[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) fastN);
+    static const int lo[] = { 2048, 4096, 8192, 16384 }, hi[] = { 2048, 2048, 2048, 4096 };
+    const int idx = juce::jlimit (0, 3, (int) apvtsVal ("ana_res"));
+    if (lo[idx] == specNLo && hi[idx] == specNHi) return;
+    specNLo = lo[idx];
+    specNHi = hi[idx];
+    auto orderOf = [] (int n) { int o = 0; while ((1 << o) < n) ++o; return o; };
+    fftLo = std::make_unique<juce::dsp::FFT> (orderOf (specNLo));
+    fftHi = std::make_unique<juce::dsp::FFT> (orderOf (specNHi));
+    auto hann = [] (std::vector<float>& w, int n)
+    {
+        w.resize ((size_t) n);
+        for (int i = 0; i < n; ++i) w[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) n);
+    };
+    hann (winLo, specNLo);
+    hann (winHi, specNHi);
     snapL.assign (16384, 0.0f);
     snapR.assign (16384, 0.0f);
     fftData.assign (32768, 0.0f);
     powBuf.assign (8193, 0.0f);
-    powFast.assign (4097, 0.0f);
-    initSpec (preSm);
-    initSpec (postSm);
-    initSpec (overlaySm);
+    for (Spec* s : { &preSm, &postSm, &overlaySm }) { s->lo.assign (8193, -120.0f); s->hi.assign (8193, -120.0f); }
 }
 
 // Fixed 4096 point magnitude spectrum of the input (mono sum) for Auto Peaks and EQ Match: fftData[0..2048]
@@ -149,15 +147,20 @@ void EQDisplay::toolSpectrum()
 
 void EQDisplay::timerCallback()
 {
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    anaDt = lastAnaMs > 0.0 ? juce::jlimit (0.005f, 0.1f, (float) ((nowMs - lastAnaMs) * 0.001)) : 1.0f / 40.0f;
+    lastAnaMs = nowMs;
     configureAnalyzer();   // the resolution setting may have changed
-    const double now = juce::Time::getMillisecondCounterHiRes();
-    const float dt = lastTick > 0.0 ? juce::jlimit (0.004f, 0.1f, (float) ((now - lastTick) * 0.001)) : (1.0f / 60.0f);   // real frame time: smoothing is frame-rate independent
-    lastTick = now;
+    rangeDb = anaRange();
+    tiltDb = anaTilt();
+
     const bool ana = apvtsVal ("analyzer") > 0.5f && apvtsVal ("ana_freeze") < 0.5f;
     const int view = (int) apvtsVal ("ana_view");   // 0 pre, 1 post, 2 both
+    bool force = false;
 
     if (capMode != 0 || peakListen > 0)
     {
+        force = true;
         toolSpectrum();
         if (peakListen > 0)   // Auto Peaks: average the input spectrum over ~2.5 s
         {
@@ -177,72 +180,135 @@ void EQDisplay::timerCallback()
     }
     if (ana)
     {
-        if (view != 1) updateSpectrum (proc.preAnalyzer, preSm, dt);     // only analyze what is shown (saves CPU)
-        if (view != 0) updateSpectrum (proc.postAnalyzer, postSm, dt);
+        const int lat = proc.latencyNow.load();   // the output is delayed by the latency: delay the input spectrum the same amount so Pre and Post line up in time
+        if (view != 1) { updateSpectrum (proc.preAnalyzer, preSm, lat); buildLevels (preSm, lvPre); }
+        if (view != 0) { updateSpectrum (proc.postAnalyzer, postSm, 0); buildLevels (postSm, lvPost); }
         if (overlayProc != nullptr)
         {
-            if (RajvikEQAudioProcessor::snapshotPost (overlayProc, snapL.data(), snapR.data(), specN)) computeSpectrum (overlaySm, dt);
+            if (RajvikEQAudioProcessor::snapshotPost (overlayProc, snapL.data(), snapR.data(), specNLo)) { computeSpectrum (overlaySm); buildLevels (overlaySm, lvOv); }
             else overlayProc = nullptr;
         }
+        if (++peakTick >= 6) { peakTick = 0; updatePeakLabels(); }   // ~7 times per second: stable labels
     }
-    repaint();
+
+    // repaint only when something visible changed (no CPU while idle)
+    const double sig = frameSignature();
+    if (force || std::abs (sig - lastSig) > 1.0e-6) { lastSig = sig; repaint(); }
 }
 
-void EQDisplay::updateSpectrum (const Analyzer& a, SpecArr& sm, float dt)
+void EQDisplay::updateSpectrum (const Analyzer& a, Spec& s, int delay)
 {
-    a.snapshot (snapL.data(), snapR.data(), specN);
-    computeSpectrum (sm, dt);
+    a.snapshot (snapL.data(), snapR.data(), specNLo, juce::jlimit (0, Analyzer::size - specNLo, delay));
+    computeSpectrum (s);
 }
 
-// Level of every FFT bin in dBFS. Left and right are analyzed separately and their power is averaged (no phase cancellation
-// like a mono sum). Two FFT sizes run side by side: the long one resolves the bass, the short one (newest samples only)
-// follows the music with almost no delay. Both are normalised to the same noise density so they blend without a step.
-// Attack / release smoothing uses the real frame time (the Speed setting only changes the release).
-void EQDisplay::computeSpectrum (SpecArr& sm, float dt)
+// bass region: chosen resolution; everything above: the shorter FFT (reacts faster, like the audio)
+void EQDisplay::computeSpectrum (Spec& s)
 {
-    const int N = specN, bins = N / 2 + 1, n = fastN, nb = n / 2 + 1;
+    computeBins (snapL.data(), snapR.data(), specNLo, *fftLo, winLo, s.lo);
+    if (specNHi != specNLo)
+    {
+        const int off = specNLo - specNHi;   // the newest specNHi samples
+        computeBins (snapL.data() + off, snapR.data() + off, specNHi, *fftHi, winHi, s.hi);
+    }
+}
+
+// Level of every FFT bin in dBFS, calibrated so a full scale sine reads 0 dB. Left and right are analyzed separately and
+// their power is averaged (no phase cancellation like a mono sum); then attack / release smoothing (the Speed setting).
+void EQDisplay::computeBins (const float* l, const float* r, int N, juce::dsp::FFT& fftObj, const std::vector<float>& window, SpecArr& sm)
+{
+    const int bins = N / 2 + 1;
     std::fill (powBuf.begin(), powBuf.begin() + bins, 0.0f);
-    std::fill (powFast.begin(), powFast.begin() + nb, 0.0f);
     for (int ch = 0; ch < 2; ++ch)
     {
-        const float* src = ch == 0 ? snapL.data() : snapR.data();
-        for (int i = 0; i < N; ++i) fftData[(size_t) i] = src[i] * win[(size_t) i];
+        const float* src = ch == 0 ? l : r;
+        for (int i = 0; i < N; ++i) fftData[(size_t) i] = src[i] * window[(size_t) i];
         std::fill (fftData.begin() + N, fftData.begin() + 2 * N, 0.0f);
-        fft->performFrequencyOnlyForwardTransform (fftData.data());
+        fftObj.performFrequencyOnlyForwardTransform (fftData.data());
         for (int k = 0; k < bins; ++k) powBuf[(size_t) k] += fftData[(size_t) k] * fftData[(size_t) k];
-
-        const float* s2 = src + (N - n);   // the newest n samples
-        for (int i = 0; i < n; ++i) fftData[(size_t) i] = s2[i] * winFast[(size_t) i];
-        std::fill (fftData.begin() + n, fftData.begin() + 2 * n, 0.0f);
-        fftFast->performFrequencyOnlyForwardTransform (fftData.data());
-        for (int k = 0; k < nb; ++k) powFast[(size_t) k] += fftData[(size_t) k] * fftData[(size_t) k];
     }
     static const float relTau[] = { 1.2f, 0.6f, 0.3f, 0.15f, 0.07f };   // release time constants (seconds)
     const float rel = relTau[juce::jlimit (0, 4, (int) apvtsVal ("ana_speed"))];
-    const float aAtkLo = 1.0f - std::exp (-dt / 0.030f), aAtkHi = 1.0f - std::exp (-dt / 0.016f), aRel = 1.0f - std::exp (-dt / rel);
-    const float calLo = 0.5f * 16.0f / ((float) N * (float) N);                  // 0.5 = mean of L and R, (4 / N)^2 = amplitude scaling of the Hann window
-    const float calHi = 0.5f * 16.0f / ((float) n * (float) N);                  // same noise density as the long FFT
+    const float aAtk = 1.0f - std::exp (-anaDt / 0.010f), aRel = 1.0f - std::exp (-anaDt / rel);   // attack 10 ms: peaks show up immediately
+    const float cal = 0.5f * 16.0f / ((float) N * (float) N);   // 0.5 = mean of L and R, (4 / N)^2 = amplitude scaling of the Hann window
     for (int k = 0; k < bins; ++k)
     {
-        const float db = 10.0f * std::log10 (powBuf[(size_t) k] * calLo + 1.0e-12f);
-        float& s = sm.lo[(size_t) k];
-        s += (db > s ? aAtkLo : aRel) * (db - s);
+        const float db = 10.0f * std::log10 (powBuf[(size_t) k] * cal + 1.0e-12f);
+        float& s = sm[(size_t) k];
+        s += (db > s ? aAtk : aRel) * (db - s);
     }
-    for (int k = 0; k < nb; ++k)
+}
+
+void EQDisplay::buildLevels (const Spec& s, std::vector<float>& out) const
+{
+    const int nx = getWidth() / 2 + 2;
+    out.resize ((size_t) nx);
+    for (int xi = 0; xi < nx; ++xi) out[(size_t) xi] = spectrumDbAt (s, (float) (xi * 2));
+}
+
+// the three strongest, clearly separated peaks of the shown spectrum get a frequency tag (Pro-Q style)
+void EQDisplay::updatePeakLabels()
+{
+    peakPts.clear();
+    if (apvtsVal ("ana_peaks") < 0.5f) return;
+    const auto& lv = apvtsVal ("ana_view") < 0.5f ? lvPre : lvPost;
+    const int n = (int) lv.size(), W = 14;   // +/- 28 px
+    if (n < 2 * W + 4) return;
+    struct Cand { int i; float db; };
+    std::vector<Cand> c;
+    for (int i = W; i < n - W; ++i)
     {
-        const float db = 10.0f * std::log10 (powFast[(size_t) k] * calHi + 1.0e-12f);
-        float& s = sm.hi[(size_t) k];
-        s += (db > s ? aAtkHi : aRel) * (db - s);
+        const float v = lv[(size_t) i];
+        bool isMax = true;
+        float mean = 0.0f;
+        for (int j = -W; j <= W; ++j)
+        {
+            const float u = lv[(size_t) (i + j)];
+            if (u > v) { isMax = false; break; }
+            mean += u;
+        }
+        if (! isMax) continue;
+        mean /= (float) (2 * W + 1);
+        if (v - mean < 3.0f || v < -rangeDb * 0.85f) continue;   // a real peak, not a flat bit or the noise floor
+        c.push_back ({ i, v });
     }
-    // running sums of linear power: the per pixel power average of the highs becomes O(1)
-    sm.cLo[0] = 0.0; sm.cHi[0] = 0.0;
-    for (int k = 0; k < bins; ++k) sm.cLo[(size_t) k + 1] = sm.cLo[(size_t) k] + (double) std::exp (sm.lo[(size_t) k] * 0.2302585f);
-    for (int k = 0; k < nb; ++k)   sm.cHi[(size_t) k + 1] = sm.cHi[(size_t) k] + (double) std::exp (sm.hi[(size_t) k] * 0.2302585f);
+    std::sort (c.begin(), c.end(), [] (const Cand& a, const Cand& b) { return a.db > b.db; });
+    for (const auto& k : c)
+    {
+        const float x = (float) (k.i * 2);
+        bool far = true;
+        for (const auto& p : peakPts) if (std::abs (p.x - x) < 90.0f) far = false;
+        if (far) peakPts.push_back ({ x, anaY (k.db) });
+        if (peakPts.size() >= 3) break;
+    }
+}
+
+// a cheap number that changes whenever anything drawn here changes
+double EQDisplay::frameSignature() const
+{
+    double s = 0.0;
+    for (int b = 0; b < numBands; ++b)
+    {
+        if (apvtsVal (pid (b, "en")) < 0.5f) continue;
+        double t = 1.0;
+        int k = 1;
+        for (const char* n : { "type", "freq", "gain", "q", "slope", "dyn", "spec", "thr", "range", "place", "dir", "sc" })
+            t += (double) apvtsVal (pid (b, n)) * (1.0 + 0.37 * (double) k++);
+        s += (t + (double) proc.dynDb[(size_t) b].load() * 3.1) * (double) (b + 1);
+    }
+    for (const char* n : { "disp_range", "analyzer", "ana_view", "ana_range", "ana_tilt", "ana_peaks", "notes", "mode", "os", "ana_res" })
+        s += (double) apvtsVal (n) * 17.3 * (double) (1 + (int) (n[0] + n[1]));
+    s += (double) selected * 101.0 + (double) proc.soloBand.load() * 77.0;
+    for (const auto* v : { &lvPre, &lvPost, &lvOv })
+        for (size_t i = 0; i < v->size(); i += 5) s += (double) (*v)[i] * 0.013 * (double) (1 + (i % 7));
+    const auto& mk = proc.spectralStage().mask;
+    for (int k = 0; k < SpectralStage::bins; k += 6) s += (double) mk[(size_t) k] * 0.021;
+    return s;
 }
 
 // Level (dB) of the analyzer at pixel column x, without tilt.
 // Many bins per pixel (highs): power average. Fewer than one bin per pixel (lows): smooth interpolation that cannot overshoot.
-float EQDisplay::binsDbAt (const std::vector<float>& sm, const std::vector<double>& cum, int N, float x) const
+float EQDisplay::binsDbAt (const float* sm, int N, float x) const
 {
     const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
     const float binHz = (float) fs / (float) N;
@@ -251,66 +317,69 @@ float EQDisplay::binsDbAt (const std::vector<float>& sm, const std::vector<doubl
     if (p1 - p0 > 1.0f)
     {
         const int k0 = juce::jlimit (1, maxK, (int) std::ceil (p0)), k1 = juce::jlimit (k0, maxK, (int) std::floor (p1));
-        const double pw = (cum[(size_t) k1 + 1] - cum[(size_t) k0]) / (double) (k1 - k0 + 1);
-        return (float) (10.0 * std::log10 (pw + 1.0e-12));
+        double pw = 0.0;
+        for (int k = k0; k <= k1; ++k) pw += std::pow (10.0, (double) sm[k] * 0.1);
+        return (float) (10.0 * std::log10 (pw / (double) (k1 - k0 + 1) + 1.0e-12));
     }
     const float pos = juce::jlimit (1.0f, (float) (maxK - 1), 0.5f * (p0 + p1));
     const int k = (int) pos;
     const float t = pos - (float) k;
-    const float a = sm[(size_t) k - 1], b = sm[(size_t) k], c = sm[(size_t) k + 1], d = sm[(size_t) k + 2];
+    const float a = sm[k - 1], b = sm[k], c = sm[k + 1], d = sm[k + 2];
     const float db = b + 0.5f * t * (c - a + t * (2.0f * a - 5.0f * b + 4.0f * c - d + t * (3.0f * (b - c) + d - a)));
     return juce::jlimit (juce::jmin (b, c) - 2.0f, juce::jmax (b, c) + 1.5f, db);
 }
 
-// 0 = use the long FFT, 1 = use the fast FFT (cross-fade between ~6 and ~24 bins of the fast FFT)
-float EQDisplay::fastWeight (float f) const
-{
-    const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
-    const float f0 = 6.0f * (float) fs / (float) fastN, f1 = 24.0f * (float) fs / (float) fastN;
-    const float t = juce::jlimit (0.0f, 1.0f, std::log2 (juce::jmax (f, 1.0f) / f0) / std::log2 (f1 / f0));
-    return t * t * (3.0f - 2.0f * t);
-}
-
 // incl. the analyzer tilt (dB per octave around 1 kHz, like the Pro-Q "Tilt" setting)
-float EQDisplay::spectrumDbAt (const SpecArr& sm, float x) const
+float EQDisplay::spectrumDbAt (const Spec& s, float x) const
 {
     const float f = juce::jmax (10.0f, xToFreq (x));
-    const float t = fastWeight (f);
     float db;
-    if (t <= 0.0f)      db = binsDbAt (sm.lo, sm.cLo, specN, x);
-    else if (t >= 1.0f) db = binsDbAt (sm.hi, sm.cHi, fastN, x);
-    else                db = binsDbAt (sm.lo, sm.cLo, specN, x) * (1.0f - t) + binsDbAt (sm.hi, sm.cHi, fastN, x) * t;
-    return db + anaTilt() * std::log2 (f / 1000.0f);
+    if (specNLo == specNHi) db = binsDbAt (s.lo.data(), specNLo, x);
+    else
+    {
+        const float t = juce::jlimit (0.0f, 1.0f, std::log2 (f / 140.0f));   // bass detail below 140 Hz, the fast window above 280 Hz
+        if (t <= 0.0f) db = binsDbAt (s.lo.data(), specNLo, x);
+        else if (t >= 1.0f) db = binsDbAt (s.hi.data(), specNHi, x);
+        else
+        {
+            const float k = t * t * (3.0f - 2.0f * t);
+            db = binsDbAt (s.lo.data(), specNLo, x) * (1.0f - k) + binsDbAt (s.hi.data(), specNHi, x) * k;
+        }
+    }
+    return db + tiltDb * std::log2 (f / 1000.0f);
 }
 
-void EQDisplay::drawSpectrum (juce::Graphics& g, const SpecArr& sm, juce::Colour c, float alpha, bool filled)
+void EQDisplay::drawLevels (juce::Graphics& g, const std::vector<float>& lv, juce::Colour fillCol, float fillAlpha, juce::Colour lineCol, float lineAlpha, float lineW)
 {
+    if (lv.size() < 2) return;
     const float h = (float) getHeight();
-    const float R = anaRange();
     juce::Path line;
-    for (int x = 0; x < getWidth(); x += 2)
+    for (size_t xi = 0; xi < lv.size(); ++xi)
     {
-        const float db = spectrumDbAt (sm, (float) x);
-        const float y = h * (1.0f - juce::jlimit (0.0f, 1.0f, (db + R) / R));   // 0 dBFS at the top, -range at the bottom
-        if (x == 0) line.startNewSubPath (0.0f, y); else line.lineTo ((float) x, y);
+        const float x = (float) (xi * 2), y = anaY (lv[xi]);
+        if (xi == 0) line.startNewSubPath (x, y); else line.lineTo (x, y);
     }
-    if (filled)
+    if (fillAlpha > 0.0f)
     {
         juce::Path fill (line);
-        fill.lineTo ((float) getWidth(), h);
+        fill.lineTo ((float) ((lv.size() - 1) * 2), h);
         fill.lineTo (0.0f, h);
         fill.closeSubPath();
-        g.setGradientFill (juce::ColourGradient (c.withAlpha (alpha), 0.0f, h * 0.3f, c.withAlpha (0.02f), 0.0f, h, false));
+        g.setGradientFill (juce::ColourGradient (fillCol.withAlpha (fillAlpha), 0.0f, h * 0.3f, fillCol.withAlpha (0.02f), 0.0f, h, false));
         g.fillPath (fill);
     }
-    g.setColour (c.withAlpha (filled ? 0.95f : 0.55f));
-    g.strokePath (line, juce::PathStrokeType (filled ? 1.5f : 1.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour (lineCol.withAlpha (lineAlpha));
+    g.strokePath (line, juce::PathStrokeType (lineW, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 }
 
-void EQDisplay::paintGrid (juce::Graphics& g)
+void EQDisplay::renderBackground (juce::Image& img, float ps)
 {
+    const int pw = juce::jmax (1, juce::roundToInt ((float) getWidth() * ps)), ph = juce::jmax (1, juce::roundToInt ((float) getHeight() * ps));
+    img = juce::Image (juce::Image::RGB, pw, ph, false);
+    juce::Graphics g (img);
+    g.addTransform (juce::AffineTransform::scale ((float) pw / (float) juce::jmax (1, getWidth()), (float) ph / (float) juce::jmax (1, getHeight())));
     const float w = (float) getWidth(), h = (float) getHeight();
-    g.setColour (juce::Colours::black.withAlpha (0.30f));
+    g.setGradientFill (juce::ColourGradient (Look::bgTop.darker (0.55f), 0.0f, 0.0f, Look::bgBot.darker (0.25f), 0.0f, h, false));
     g.fillAll();
 
     // grid
@@ -332,29 +401,116 @@ void EQDisplay::paintGrid (juce::Graphics& g)
         g.setColour (juce::Colours::white.withAlpha (std::abs (gdb) < 0.01f ? 0.16f : 0.045f));
         g.drawHorizontalLine ((int) gainToY (gdb), 0.0f, w);
     }
-
-    if (apvtsVal ("analyzer") > 0.5f)
+    if (apvtsVal ("analyzer") > 0.5f)   // faint analyzer scale lines (the numbers are in the strip on the right)
     {
-        {   // analyzer scale (dBFS) on the left, separate from the EQ gain grid
-            const float R = anaRange();
-            g.setFont (juce::Font (juce::FontOptions (10.0f)));
-            for (int i = 1; i <= 2; ++i)
-            {
-                const float db = -R * (float) i / 3.0f;
-                const float y = h * (1.0f - (db + R) / R);
-                g.setColour (juce::Colour (0xff7fd6ff).withAlpha (0.035f));
-                g.drawHorizontalLine ((int) y, 0.0f, w);
-                g.setColour (juce::Colour (0xff7fd6ff).withAlpha (0.45f));
-                g.drawText (juce::String ((int) std::round (db)) + " dB", 4, (int) y - 12, 54, 12, juce::Justification::centredLeft);
-            }
-        }
+        g.setColour (juce::Colours::white.withAlpha (0.025f));
+        for (float db = -10.0f; db > -anaRange() + 0.1f; db -= 10.0f)
+            g.drawHorizontalLine ((int) (h * (1.0f - (db + anaRange()) / anaRange())), 0.0f, w);
     }
 }
 
-void EQDisplay::paintCurves (juce::Graphics& g)
+void EQDisplay::paint (juce::Graphics& g)
 {
+    if (getWidth() < 2 || getHeight() < 2) return;
     const float w = (float) getWidth(), h = (float) getHeight();
-    juce::ignoreUnused (w, h);
+
+    {   // background + grid: rendered once, redrawn only when size, range, theme or scale change
+        const float ps = g.getInternalContext().getPhysicalPixelScaleFactor();
+        int key = getWidth() * 31 + getHeight();
+        key ^= (int) apvtsVal ("disp_range") << 20;
+        key ^= (int) apvtsVal ("analyzer") << 23;
+        key ^= (int) apvtsVal ("ana_range") << 24;
+        key ^= (int) ((Look::bgBot.getARGB() * 7u) ^ Look::bgTop.getARGB());
+        if (bgImage.isNull() || key != bgKey || std::abs (ps - bgScale) > 0.01f)
+        {
+            renderBackground (bgImage, ps);
+            bgKey = key;
+            bgScale = ps;
+        }
+        g.drawImage (bgImage, 0, 0, getWidth(), getHeight(), 0, 0, bgImage.getWidth(), bgImage.getHeight());
+    }
+
+    const int view = (int) apvtsVal ("ana_view");   // 0 pre, 1 post, 2 both
+    if (apvtsVal ("analyzer") > 0.5f)
+    {
+        if (view != 1) drawLevels (g, lvPre, juce::Colour (0xff9b97b0), 0.20f, juce::Colour (0xffb9b5cc), 0.40f, 1.0f);
+        if (view != 0) drawLevels (g, lvPost, juce::Colour (0xffe4e0f2), 0.16f, juce::Colours::white, 0.88f, 1.4f);
+        if (overlayProc != nullptr) drawLevels (g, lvOv, juce::Colour (0xffff9f43), 0.22f, juce::Colour (0xffff9f43), 0.90f, 1.3f);
+
+        g.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::bold)));
+        for (const auto& p : peakPts)   // frequency tags on the strongest peaks
+        {
+            const float f = xToFreq (p.x);
+            const juce::String t = f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + " kHz" : juce::String ((int) std::lround (f)) + " Hz";
+            const float tw = (float) t.length() * 6.6f + 14.0f;
+            const float bx = juce::jlimit (2.0f, w - tw - 2.0f, p.x - tw * 0.5f), by = juce::jmax (2.0f, p.y - 30.0f);
+            g.setColour (Look::gold);
+            g.fillEllipse (p.x - 3.5f, p.y - 3.5f, 7.0f, 7.0f);
+            g.fillRoundedRectangle (bx, by, tw, 18.0f, 5.0f);
+            juce::Path tri;
+            tri.addTriangle (p.x - 4.0f, by + 18.0f, p.x + 4.0f, by + 18.0f, p.x, by + 23.0f);
+            g.fillPath (tri);
+            g.setColour (juce::Colour (0xff1a1822));
+            g.drawText (t, (int) bx, (int) by, (int) tw, 18, juce::Justification::centred);
+        }
+    }
+
+    // live spectral cut (what the Spectral bands are doing to each frequency right now)
+    {
+        int firstSpec = -1;
+        for (int b = 0; b < numBands; ++b) if (apvtsVal (pid (b, "en")) > 0.5f && kindOf (b) == ModeSpectral) { firstSpec = b; break; }
+        if (firstSpec >= 0)
+        {
+            const auto col = kindOf (selected) == ModeSpectral && apvtsVal (pid (selected, "en")) > 0.5f ? bandColour (selected) : bandColour (firstSpec);
+                const auto& mk = proc.spectralStage().mask;
+                    const double sfs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
+                    juce::Path mp;
+                    const float zy = gainToY (0.0f);
+                    for (int x = 0; x < getWidth(); x += 2)
+                    {
+                        const float pos = juce::jlimit (0.0f, (float) SpectralStage::bins - 2.0f, xToFreq ((float) x) * (float) SpectralStage::N / (float) sfs);
+                        const int k = (int) pos;
+                        const float fr = pos - (float) k;
+                        const float db = mk[(size_t) k] * (1.0f - fr) + mk[(size_t) k + 1] * fr;
+                        const float y = gainToY (juce::jlimit (-60.0f, 60.0f, db));
+                        if (x == 0) mp.startNewSubPath (0.0f, y); else mp.lineTo ((float) x, y);
+                    }
+                    juce::Path fillP (mp);
+                    fillP.lineTo ((float) getWidth(), zy);
+                    fillP.lineTo (0.0f, zy);
+                    fillP.closeSubPath();
+                    g.setColour (col.withAlpha (0.28f));
+                    g.fillPath (fillP);
+                    g.setColour (col);
+                    g.strokePath (mp, juce::PathStrokeType (1.6f));
+            }
+    }
+
+    // threshold + live spectral action of the selected dynamic band
+    {
+        const int sb = selected;
+        const int stype = (int) apvtsVal (pid (sb, "type"));
+        const int skind = dynModeOf (apvtsVal (pid (sb, "dyn")) > 0.5f, apvtsVal (pid (sb, "spec")) > 0.5f, stype);
+        if (apvtsVal (pid (sb, "en")) > 0.5f && skind != ModeNormal)
+        {
+            const auto col = bandColour (sb);
+            const float f0 = apvtsVal (pid (sb, "freq")), qq = juce::jmax (0.1f, apvtsVal (pid (sb, "q")));
+            const float hq = 1.0f / qq, hi = f0 * 0.5f * (hq + std::sqrt (hq * hq + 4.0f)), lo = f0 * 0.5f * (-hq + std::sqrt (hq * hq + 4.0f));
+            const float x1 = freqToX (lo), x2 = freqToX (hi);
+            const float thr = apvtsVal (pid (sb, "thr"));
+            // the threshold is drawn on the analyzer scale incl. its tilt, so "the spectrum crosses the line" = "the band reacts"
+            auto thrY = [this, thr] (float x) { return anaY (thr + tiltDb * std::log2 (juce::jmax (10.0f, xToFreq (x)) / 1000.0f)); };
+            g.setColour (col.withAlpha (0.06f));
+            g.fillRect (juce::Rectangle<float> (x1, 0.0f, juce::jmax (1.0f, x2 - x1), h));
+            const float dash[] = { 6.0f, 4.0f };
+            g.setColour (col.withAlpha (0.95f));
+            g.drawDashedLine (juce::Line<float> (x1 - 30.0f, thrY (x1 - 30.0f), x2 + 30.0f, thrY (x2 + 30.0f)), dash, 2, 1.5f);
+            g.setFont (juce::Font (juce::FontOptions (11.5f)));
+            g.drawText (juce::String (apvtsVal (pid (sb, "thr")), 1) + " dB", (int) x1 - 30, (int) thrY (x1 - 30.0f) - 16, 70, 14, juce::Justification::left);
+
+        }
+    }
+
     // band designs (static gain + current dynamic offset), at the rate the bands really run at (oversampling / linear phase)
     const double fs = (proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0) * (double) proc.responseRateFactor();
     std::array<BandDesign, numBands> designs;
@@ -418,123 +574,6 @@ void EQDisplay::paintCurves (juce::Graphics& g)
     g.strokePath (curve, juce::PathStrokeType (9.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour (Look::gold);
     g.strokePath (curve, juce::PathStrokeType (2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-}
-
-std::vector<float> EQDisplay::gridKeyNow (float scale) const
-{
-    return { (float) getWidth(), (float) getHeight(), dispRange(), anaRange(), apvtsVal ("analyzer"), scale };
-}
-
-std::vector<float> EQDisplay::curveKeyNow (float scale) const
-{
-    std::vector<float> k;
-    k.reserve (numBands * 10 + 12);
-    const auto argb = Look::gold.getARGB();
-    for (float v : { (float) getWidth(), (float) getHeight(), dispRange(), (float) selected, (float) proc.responseRateFactor(),
-                     (float) proc.getSampleRate(), scale, (float) (argb >> 16), (float) (argb & 0xffff) })
-        k.push_back (v);
-    for (int b = 0; b < numBands; ++b)
-    {
-        k.push_back (apvtsVal (pid (b, "en")));
-        if (apvtsVal (pid (b, "en")) < 0.5f) continue;
-        for (const char* n : { "type", "freq", "gain", "q", "slope", "dyn", "spec" }) k.push_back (apvtsVal (pid (b, n)));
-        k.push_back (kindOf (b) == ModeDynamic ? proc.dynDb[(size_t) b].load() : 0.0f);
-    }
-    return k;
-}
-
-// the static layers (grid, EQ curves) live in cached images at physical pixel size: while only the analyzer moves,
-// a frame is two blits plus the analyzer instead of recomputing every filter response
-void EQDisplay::drawCached (juce::Graphics& g, juce::Image& img, std::vector<float>& cachedKey, const std::vector<float>& key, float scale, bool curves)
-{
-    const int pw = juce::jmax (1, juce::roundToInt ((float) getWidth() * scale)), ph = juce::jmax (1, juce::roundToInt ((float) getHeight() * scale));
-    const bool sizeChanged = img.getWidth() != pw || img.getHeight() != ph;
-    if (sizeChanged || key != cachedKey)
-    {
-        if (sizeChanged) img = juce::Image (juce::Image::ARGB, pw, ph, true);
-        else img.clear (img.getBounds());
-        juce::Graphics ig (img);
-        ig.addTransform (juce::AffineTransform::scale ((float) pw / (float) getWidth(), (float) ph / (float) getHeight()));
-        if (curves) paintCurves (ig); else paintGrid (ig);
-        cachedKey = key;
-    }
-    g.drawImage (img, 0, 0, getWidth(), getHeight(), 0, 0, pw, ph);
-}
-
-void EQDisplay::paint (juce::Graphics& g)
-{
-    const float w = (float) getWidth(), h = (float) getHeight();
-    if (getWidth() < 2 || getHeight() < 2) return;
-    const float pscale = juce::jmax (1.0f, (float) g.getInternalContext().getPhysicalPixelScaleFactor());
-    drawCached (g, gridImg, gridKey, gridKeyNow (pscale), pscale, false);
-
-    const int view = (int) apvtsVal ("ana_view");   // 0 pre, 1 post, 2 both
-    if (apvtsVal ("analyzer") > 0.5f)
-    {
-        if (view != 1) drawSpectrum (g, preSm, juce::Colour (0xff8f8aa6), 0.0f, false);
-        if (view != 0) drawSpectrum (g, postSm, juce::Colour (0xff7fd6ff), 0.34f, true);
-        if (overlayProc != nullptr) drawSpectrum (g, overlaySm, juce::Colour (0xffff9f43), 0.26f, true);
-    }
-
-    // live spectral cut (what the Spectral bands are doing to each frequency right now)
-    {
-        int firstSpec = -1;
-        for (int b = 0; b < numBands; ++b) if (apvtsVal (pid (b, "en")) > 0.5f && kindOf (b) == ModeSpectral) { firstSpec = b; break; }
-        if (firstSpec >= 0)
-        {
-            const auto col = kindOf (selected) == ModeSpectral && apvtsVal (pid (selected, "en")) > 0.5f ? bandColour (selected) : bandColour (firstSpec);
-                const auto& mk = proc.spectralStage().mask;
-                    const double sfs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
-                    juce::Path mp;
-                    const float zy = gainToY (0.0f);
-                    for (int x = 0; x < getWidth(); x += 2)
-                    {
-                        const float pos = juce::jlimit (0.0f, (float) SpectralStage::bins - 2.0f, xToFreq ((float) x) * (float) SpectralStage::N / (float) sfs);
-                        const int k = (int) pos;
-                        const float fr = pos - (float) k;
-                        const float db = mk[(size_t) k] * (1.0f - fr) + mk[(size_t) k + 1] * fr;
-                        const float y = gainToY (juce::jlimit (-60.0f, 60.0f, db));
-                        if (x == 0) mp.startNewSubPath (0.0f, y); else mp.lineTo ((float) x, y);
-                    }
-                    juce::Path fillP (mp);
-                    fillP.lineTo ((float) getWidth(), zy);
-                    fillP.lineTo (0.0f, zy);
-                    fillP.closeSubPath();
-                    g.setColour (col.withAlpha (0.28f));
-                    g.fillPath (fillP);
-                    g.setColour (col);
-                    g.strokePath (mp, juce::PathStrokeType (1.6f));
-            }
-    }
-
-    // threshold + live spectral action of the selected dynamic band
-    {
-        const int sb = selected;
-        const int stype = (int) apvtsVal (pid (sb, "type"));
-        const int skind = dynModeOf (apvtsVal (pid (sb, "dyn")) > 0.5f, apvtsVal (pid (sb, "spec")) > 0.5f, stype);
-        if (apvtsVal (pid (sb, "en")) > 0.5f && skind != ModeNormal)
-        {
-            const auto col = bandColour (sb);
-            const float f0 = apvtsVal (pid (sb, "freq")), qq = juce::jmax (0.1f, apvtsVal (pid (sb, "q")));
-            const float hq = 1.0f / qq, hi = f0 * 0.5f * (hq + std::sqrt (hq * hq + 4.0f)), lo = f0 * 0.5f * (-hq + std::sqrt (hq * hq + 4.0f));
-            const float x1 = freqToX (lo), x2 = freqToX (hi);
-            const float ty = h * (1.0f - juce::jlimit (0.0f, 1.0f, (apvtsVal (pid (sb, "thr")) + 100.0f) / 80.0f));
-            g.setColour (col.withAlpha (0.06f));
-            g.fillRect (juce::Rectangle<float> (x1, 0.0f, juce::jmax (1.0f, x2 - x1), h));
-            const float dash[] = { 6.0f, 4.0f };
-            g.setColour (col.withAlpha (0.95f));
-            g.drawDashedLine (juce::Line<float> (x1 - 30.0f, ty, x2 + 30.0f, ty), dash, 2, 1.5f);
-            g.setFont (juce::Font (juce::FontOptions (11.5f)));
-            g.drawText (juce::String (apvtsVal (pid (sb, "thr")), 1) + " dB", (int) x1 - 30, (int) ty - 16, 70, 14, juce::Justification::left);
-
-        }
-    }
-
-    drawCached (g, curveImg, curveKey, curveKeyNow (pscale), pscale, true);
-    std::array<bool, numBands> on {};
-    int numOn = 0;
-    for (int b = 0; b < numBands; ++b) { on[(size_t) b] = apvtsVal (pid (b, "en")) > 0.5f; if (on[(size_t) b]) ++numOn; }
 
     if (numOn == 0 && ! sketchMode)
     {
@@ -717,6 +756,7 @@ void EQDisplay::paint (juce::Graphics& g)
 
 void EQDisplay::mouseDown (const juce::MouseEvent& e)
 {
+    repaint();
     grabKeyboardFocus();
     if (sketchMode) { sketch.clear(); sketch.push_back (e.position); return; }
     const int h = hitTest (e.position);
@@ -749,6 +789,7 @@ void EQDisplay::mouseDown (const juce::MouseEvent& e)
 
 void EQDisplay::mouseDrag (const juce::MouseEvent& e)
 {
+    repaint();
     hoverX = e.position.x; hoverY = e.position.y;
     if (sketchMode) { sketch.push_back (e.position); repaint(); return; }
     if (marqueeing) { mqRect = juce::Rectangle<float> (mqStart, e.position); repaint(); return; }
@@ -790,6 +831,7 @@ void EQDisplay::finishMarquee (bool additive)
 
 void EQDisplay::mouseUp (const juce::MouseEvent& e)
 {
+    repaint();
     if (sketchMode) { finishSketch(); return; }
     if (marqueeing) { finishMarquee (e.mods.isShiftDown() || e.mods.isCommandDown() || e.mods.isCtrlDown()); return; }
     if (! dragging) return;
@@ -848,6 +890,7 @@ bool EQDisplay::keyPressed (const juce::KeyPress& k)
 
 void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
 {
+    repaint();
     if (sketchMode) return;
     const int h = hitTest (e.position);
     if (h >= 0) { setIndex (pid (h, "en"), 0); repaint(); return; }
@@ -868,8 +911,8 @@ void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
     }
 }
 
-void EQDisplay::mouseMove (const juce::MouseEvent& e) { hoverX = e.position.x; hoverY = e.position.y; }
-void EQDisplay::mouseExit (const juce::MouseEvent&) { hoverX = -1.0f; hoverY = -1.0f; }
+void EQDisplay::mouseMove (const juce::MouseEvent& e) { hoverX = e.position.x; hoverY = e.position.y; repaint(); }
+void EQDisplay::mouseExit (const juce::MouseEvent&) { hoverX = -1.0f; hoverY = -1.0f; repaint(); }
 
 void EQDisplay::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wd)
 {
@@ -1063,10 +1106,7 @@ void EQDisplay::finishPeakSearch()
     if (w < 100 || top < -95.0f) return;   // nothing was playing
 
     std::vector<float> lev ((size_t) w);
-    std::vector<float> avgV (avg.begin(), avg.end());
-    std::vector<double> avgCum (avgV.size() + 1, 0.0);
-    for (size_t k = 0; k < avgV.size(); ++k) avgCum[k + 1] = avgCum[k] + (double) std::exp (avgV[k] * 0.2302585f);
-    for (int x = 0; x < w; ++x) lev[(size_t) x] = binsDbAt (avgV, avgCum, 4096, (float) x);
+    for (int x = 0; x < w; ++x) lev[(size_t) x] = binsDbAt (avg.data(), 4096, (float) x);
     struct Pk { int x; float prom; };
     std::vector<Pk> pks;
     for (int x = 8; x < w - 8; ++x)
@@ -1583,9 +1623,34 @@ void BandPanel::resized()
 void ScaleStrip::timerCallback()
 {
     const float l = proc.peakL.exchange (0.0f), r = proc.peakR.exchange (0.0f);
-    lvL = juce::jmax (l, lvL * 0.94f);
-    lvR = juce::jmax (r, lvR * 0.94f);
-    repaint();
+    const float oldL = lvL, oldR = lvR;
+    lvL = juce::jmax (l, lvL * 0.88f);
+    lvR = juce::jmax (r, lvR * 0.88f);
+    if (lvL < 1.0e-5f) lvL = 0.0f;
+    if (lvR < 1.0e-5f) lvR = 0.0f;
+    const int key = (int) proc.apvts.getRawParameterValue ("disp_range")->load() + 4 * (int) proc.apvts.getRawParameterValue ("analyzer")->load()
+                  + 8 * (int) proc.apvts.getRawParameterValue ("ana_range")->load();
+    if (key != lastKey || lvL != oldL || lvR != oldR) { lastKey = key; repaint(); }   // nothing moves while idle -> no repaint
+}
+
+void ScaleStrip::mouseDown (const juce::MouseEvent& e)
+{
+    if (! rangeRect.contains (e.position)) return;
+    static const char* names[] = { "3 dB", "6 dB", "12 dB", "30 dB" };
+    const int cur = (int) proc.apvts.getRawParameterValue ("disp_range")->load();
+    juce::PopupMenu m;
+    for (int i = 0; i < 4; ++i) m.addItem (i + 1, names[i], true, i == cur);
+    juce::Component::SafePointer<ScaleStrip> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [safe] (int r)
+    {
+        if (safe == nullptr || r <= 0) return;
+        if (auto* p = safe->proc.apvts.getParameter ("disp_range"))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost (p->convertTo0to1 ((float) (r - 1)));
+            p->endChangeGesture();
+        }
+    });
 }
 
 void ScaleStrip::paint (juce::Graphics& g)
@@ -1608,18 +1673,33 @@ void ScaleStrip::paint (juce::Graphics& g)
         g.drawText ((gdb > 0.01f ? "+" : "") + juce::String ((int) std::lround (gdb)), 2, (int) y - 8, 40, 16, juce::Justification::centredRight);
     }
 
-    if (proc.apvts.getRawParameterValue ("analyzer")->load() > 0.5f)
+    if (proc.apvts.getRawParameterValue ("analyzer")->load() > 0.5f)   // analyzer scale (dBFS), same mapping as the spectrum: 0 dB at the top
     {
+        static const float aranges[] = { 60.0f, 90.0f, 120.0f };
+        const float R = aranges[juce::jlimit (0, 2, (int) proc.apvts.getRawParameterValue ("ana_range")->load())];
         g.setColour (juce::Colours::white.withAlpha (0.40f));
-        for (int db = -30; db >= -100; db -= 10)
+        g.setFont (juce::Font (juce::FontOptions (11.5f)));
+        for (float db = -10.0f; db > -R + 0.1f; db -= 10.0f)
         {
-            const float y = juce::jlimit (8.0f, h - 8.0f, h * (1.0f - ((float) db + 100.0f) / 80.0f));
-            g.drawText (juce::String (db), 44, (int) y - 8, 32, 16, juce::Justification::centredRight);
+            const float y = h * (1.0f - (db + R) / R);
+            if (y < 34.0f || y > h - 8.0f) continue;
+            g.drawText (juce::String ((int) std::lround (db)), 44, (int) y - 8, 32, 16, juce::Justification::centredRight);
         }
     }
 
+    // EQ range button (click to change), like the "12 dB" button of Pro-Q
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
+        g.fillRoundedRectangle (rangeRect, 6.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.14f));
+        g.drawRoundedRectangle (rangeRect.reduced (0.5f), 6.0f, 1.0f);
+        g.setColour (Look::gold);
+        g.setFont (juce::Font (juce::FontOptions (12.5f)));
+        g.drawText (juce::String ((int) range) + " dB", rangeRect.toNearestInt(), juce::Justification::centred);
+    }
+
     // level meters
-    const float top = 12.0f, bottom = h - 8.0f;
+    const float top = 34.0f, bottom = h - 8.0f;
     const float xs[2] = { 80.0f, 90.0f };
     const float lv[2] = { lvL, lvR };
     for (int i = 0; i < 2; ++i)
@@ -1744,7 +1824,7 @@ public:
         anaResBox.setTooltip ("Higher resolution = more precise lows, but slower reaction (like Pro-Q)");
         anaTiltBox.setTooltip ("Spectrum tilt in dB per octave around 1 kHz. 4.5 dB/oct makes typical music look flat");
         for (auto* c : std::initializer_list<juce::Component*> { &charBox, &rangeBox, &anaViewBox, &anaRangeBox, &anaResBox, &anaSpeedBox, &anaTiltBox,
-                                                                 &analyzerBtn, &notesBtn, &invertBtn, &freezeBtn })
+                                                                 &analyzerBtn, &notesBtn, &invertBtn, &freezeBtn, &peaksBtn })
             addAndMakeVisible (c);
         charA     = std::make_unique<CA> (proc.apvts, "character", charBox);
         rangeA    = std::make_unique<CA> (proc.apvts, "disp_range", rangeBox);
@@ -1757,6 +1837,7 @@ public:
         anaSpeedA = std::make_unique<CA> (proc.apvts, "ana_speed", anaSpeedBox);
         anaTiltA  = std::make_unique<CA> (proc.apvts, "ana_tilt", anaTiltBox);
         freezeA   = std::make_unique<BA> (proc.apvts, "ana_freeze", freezeBtn);
+        peaksA    = std::make_unique<BA> (proc.apvts, "ana_peaks", peaksBtn);
 
         for (auto* b : { &resetColoursBtn, &resetSizeBtn, &resetAllBtn }) addAndMakeVisible (b);
         resetColoursBtn.setTooltip ("Back to the default accent colour and background");
@@ -1774,7 +1855,7 @@ public:
             changed();
             if (onResetSize) onResetSize();
             scaleSlider.setValue (100.0, juce::dontSendNotification);
-            for (const char* id : { "out_gain", "mode", "character", "os", "disp_range", "analyzer", "ana_view", "ana_range", "ana_res", "ana_speed", "ana_tilt", "ana_freeze", "invert", "notes" })
+            for (const char* id : { "out_gain", "mode", "character", "os", "disp_range", "analyzer", "ana_view", "ana_range", "ana_res", "ana_speed", "ana_tilt", "ana_freeze", "ana_peaks", "invert", "notes" })
                 if (auto* prm = proc.apvts.getParameter (id))
                 {
                     prm->beginChangeGesture();
@@ -1856,7 +1937,8 @@ public:
         labels.push_back ({ "Tilt", { x1, y, 104, 24 } });
         anaTiltBox.setBounds (bx, y, bw, 24);
         y += 30;
-        freezeBtn.setBounds (x1, y, 120, 24);
+        freezeBtn.setBounds (x1, y, 110, 24);
+        peaksBtn.setBounds (x1 + 112, y, 148, 24);
     }
 
 private:
@@ -1913,11 +1995,21 @@ private:
     Swatch customSw;
     juce::Slider scaleSlider;
     juce::ComboBox charBox, rangeBox, anaViewBox, anaRangeBox, anaResBox, anaSpeedBox, anaTiltBox;
-    juce::ToggleButton analyzerBtn { "Analyzer" }, notesBtn { "Piano view" }, invertBtn { "Phase invert" }, freezeBtn { "Freeze" };
+    juce::ToggleButton analyzerBtn { "Analyzer" }, notesBtn { "Piano view" }, invertBtn { "Phase invert" }, freezeBtn { "Freeze" }, peaksBtn { "Peak labels" };
     std::unique_ptr<CA> charA, rangeA, anaViewA, anaRangeA, anaResA, anaSpeedA, anaTiltA;
-    std::unique_ptr<BA> analyzerA, notesA, invertA, freezeA;
+    std::unique_ptr<BA> analyzerA, notesA, invertA, freezeA, peaksA;
     std::vector<std::pair<juce::String, juce::Rectangle<int>>> labels;
 };
+}
+
+static void setParamValue (RajvikEQAudioProcessor& p, const char* id, float v)
+{
+    if (auto* prm = p.apvts.getParameter (id))
+    {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 (v));
+        prm->endChangeGesture();
+    }
 }
 
 //==============================================================================
@@ -1934,7 +2026,8 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     addAndMakeVisible (root);
 
     for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &osL, &osBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
-                                                             &toolsBtn, &gearBtn, &analyzerBtn, &pianoBtn, &outL, &outSlider })
+                                                             &toolsBtn, &gearBtn, &undoBtn, &redoBtn, &slotA, &slotB, &copyBtn, &anaBox, &pianoBtn, &scaleBtn, &nameBtn,
+                                                             &outL, &outSlider })
         root.addAndMakeVisible (c);
     root.addAndMakeVisible (panel);
 
@@ -1979,13 +2072,48 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
 
     modeA     = std::make_unique<CA> (p.apvts, "mode", modeBox);
     osA       = std::make_unique<CA> (p.apvts, "os", osBox);
-    analyzerA = std::make_unique<BA> (p.apvts, "analyzer", analyzerBtn);
     pianoA    = std::make_unique<BA> (p.apvts, "notes", pianoBtn);
-    pianoBtn.setTooltip ("Piano view: keyboard strip under the display, notes in the readouts");
-    panel.setBufferedToImage (true);   // the soft shadow is expensive: render the panel once, not on every analyzer frame
+    pianoBtn.setTooltip ("Piano keyboard under the spectrum: shows the note of every frequency");
     outA      = std::make_unique<SA> (p.apvts, "out_gain", outSlider);
 
     display.onSketchDone = [this] { display.repaint(); };
+
+    // header: undo / redo, A/B compare
+    undoBtn.setTooltip ("Undo the last edit");
+    redoBtn.setTooltip ("Redo");
+    slotA.setTooltip ("Setting A");
+    slotB.setTooltip ("Setting B: switch between two settings to compare");
+    copyBtn.setTooltip ("Copy the current setting to the other slot (A to B or B to A)");
+    undoBtn.onClick = [this] { doUndo(); };
+    redoBtn.onClick = [this] { doRedo(); };
+    slotA.onClick = [this] { switchSlot (0); };
+    slotB.onClick = [this] { switchSlot (1); };
+    copyBtn.onClick = [this] { abState[abSlot ^ 1] = stateString(); };
+    updateAB();
+
+    // bottom bar: analyzer mode, window size, instance name
+    anaBox.addItem ("Analyzer Off", 1);
+    anaBox.addItem ("Analyzer Pre", 2);
+    anaBox.addItem ("Analyzer Post", 3);
+    anaBox.addItem ("Analyzer Pre+Post", 4);
+    anaBox.setTooltip ("Spectrum analyzer: off / input / output / both (more options in the settings)");
+    anaBox.onChange = [this]
+    {
+        const int id = anaBox.getSelectedId();
+        if (id == 1) setParamValue (proc, "analyzer", 0.0f);
+        else { setParamValue (proc, "analyzer", 1.0f); setParamValue (proc, "ana_view", (float) (id == 2 ? 0 : id == 3 ? 1 : 2)); }
+    };
+    scaleBtn.setTooltip ("Window size");
+    scaleBtn.onClick = [this] { showScaleMenu(); };
+    nameBtn.setTooltip ("Instance list: compare with other RAJVIK Pro EQ instances in this session");
+    nameBtn.setColour (juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    nameBtn.setColour (juce::TextButton::textColourOffId, Look::muted);
+    nameBtn.onClick = [this] { display.showInstances(); };
+
+    root.addMouseListener (&activity, true);
+    panel.setBufferedToImage (true);   // the band panel is repainted only when it changes, not with every analyzer frame behind it
+    lastSnap = stateString();
+    abState[0] = lastSnap;
 
     // window: freely resizable, from a small minimum up; "GUI size" in the settings scales everything
     const float s = Look::prefs.scale;
@@ -1999,6 +2127,7 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
 RajvikEQAudioProcessorEditor::~RajvikEQAudioProcessorEditor()
 {
     stopTimer();
+    root.removeMouseListener (&activity);
     proc.soloBand = -1;   // never leave a band soloed after the window is closed
     const float s = Look::prefs.scale;
     Look::prefs.width  = juce::jlimit (minW, maxW, juce::roundToInt ((float) getWidth() / s));
@@ -2013,6 +2142,109 @@ void RajvikEQAudioProcessorEditor::timerCallback()
     placePanel();
     const auto nm = Presets::presetName (proc);
     if (presetBtn.getButtonText() != nm) presetBtn.setButtonText (nm);
+
+    if (++histTick >= 4) { histTick = 0; trackHistory(); }
+    undoBtn.setEnabled (! undoStack.empty());
+    redoBtn.setEnabled (! redoStack.empty());
+
+    const int aid = proc.apvts.getRawParameterValue ("analyzer")->load() < 0.5f ? 1 : (int) proc.apvts.getRawParameterValue ("ana_view")->load() + 2;
+    if (anaBox.getSelectedId() != aid) anaBox.setSelectedId (aid, juce::dontSendNotification);
+    const auto pct = juce::String (juce::roundToInt (Look::prefs.scale * 100.0f)) + "%";
+    if (scaleBtn.getButtonText() != pct) scaleBtn.setButtonText (pct);
+    if (--nameTick <= 0)
+    {
+        nameTick = 20;
+        const auto inst = juce::String (juce::CharPointer_UTF8 ("\xe2\x97\x8f ")) + proc.displayName();
+        if (nameBtn.getButtonText() != inst) nameBtn.setButtonText (inst);
+    }
+}
+
+juce::String RajvikEQAudioProcessorEditor::stateString() const
+{
+    auto st = proc.apvts.copyState();
+    if (auto xml = st.createXml()) return xml->toString (juce::XmlElement::TextFormat().singleLine().withoutHeader());
+    return {};
+}
+
+void RajvikEQAudioProcessorEditor::applyState (const juce::String& s)
+{
+    if (auto xml = juce::parseXML (s)) proc.apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    lastSnap = stateString();   // re-read in the normal form so the next comparison is exact
+}
+
+// every finished edit (mouse released) becomes one undo step; changes made by host automation without you touching the editor are not recorded
+void RajvikEQAudioProcessorEditor::trackHistory()
+{
+    if (juce::ModifierKeys::getCurrentModifiersRealtime().isAnyMouseButtonDown()) return;
+    const bool active = (juce::Time::getMillisecondCounterHiRes() - activity.last) < 3000.0
+                     || juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0;
+    const auto cur = stateString();
+    if (cur == lastSnap) return;
+    if (active)
+    {
+        undoStack.push_back (lastSnap);
+        if (undoStack.size() > 100) undoStack.erase (undoStack.begin());
+        redoStack.clear();
+    }
+    lastSnap = cur;
+}
+
+void RajvikEQAudioProcessorEditor::doUndo()
+{
+    trackHistory();   // include the edit that is just finishing
+    if (undoStack.empty()) return;
+    redoStack.push_back (lastSnap);
+    const auto prev = undoStack.back();
+    undoStack.pop_back();
+    applyState (prev);
+}
+
+void RajvikEQAudioProcessorEditor::doRedo()
+{
+    trackHistory();
+    if (redoStack.empty()) return;
+    undoStack.push_back (lastSnap);
+    const auto next = redoStack.back();
+    redoStack.pop_back();
+    applyState (next);
+}
+
+void RajvikEQAudioProcessorEditor::switchSlot (int s)
+{
+    if (s == abSlot) return;
+    trackHistory();
+    abState[abSlot] = stateString();
+    abSlot = s;
+    if (abState[abSlot].isNotEmpty()) applyState (abState[abSlot]);
+    else abState[abSlot] = stateString();   // first visit: B starts as a copy of A
+    updateAB();
+}
+
+void RajvikEQAudioProcessorEditor::updateAB()
+{
+    slotA.setToggleState (abSlot == 0, juce::dontSendNotification);
+    slotB.setToggleState (abSlot == 1, juce::dontSendNotification);
+}
+
+void RajvikEQAudioProcessorEditor::setGuiScale (float s)
+{
+    const float old = Look::prefs.scale;
+    if (std::abs (s - old) < 0.001f) return;
+    Look::prefs.scale = s;
+    Look::prefs.save();
+    scaleChanged (old);
+}
+
+void RajvikEQAudioProcessorEditor::showScaleMenu()
+{
+    static const int pcts[] = { 50, 60, 75, 90, 100, 125, 150, 175, 200 };
+    juce::PopupMenu m;
+    for (int pc : pcts) m.addItem (pc, juce::String (pc) + "%", true, pc == juce::roundToInt (Look::prefs.scale * 100.0f));
+    juce::Component::SafePointer<RajvikEQAudioProcessorEditor> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&scaleBtn), [safe] (int r)
+    {
+        if (safe != nullptr && r > 0) safe->setGuiScale ((float) r / 100.0f);
+    });
 }
 
 void RajvikEQAudioProcessorEditor::applyLook()
@@ -2176,13 +2408,13 @@ void RajvikEQAudioProcessorEditor::placePanel()
     else if (panel.isGroupMode()) panel.select (b);          // selection shrank back to one band
     panel.update();
 
-    // the whole band panel (knobs, gain, Q, boxes, text) scales with the window: smaller windows shrink it, bigger ones enlarge it
+    // The band panel follows the window size: it shrinks with a small window and grows with a big one (1.0 = the default window).
+    // A component transform is applied around the PARENT's origin, so the panel is scaled around its own top-left corner.
     const auto db = display.getBounds();
     const int pw = panel.idealWidth(), ph = BandPanel::totalHeight;
-    const float fit  = juce::jmin ((float) (db.getWidth() - 8) / (float) pw, (float) db.getHeight() * 0.62f / (float) ph);   // never cut off
-    const float grow = juce::jmin ((float) db.getWidth() / 960.0f, (float) db.getHeight() / 540.0f);                              // 1.0 at the default window size
-    const float f = juce::jlimit (0.4f, 2.4f, juce::jmin (fit, juce::jmax (0.6f, grow)));   // knobs, boxes and text follow the window size both ways
-    panel.setTransform (juce::AffineTransform::scale (f));
+    const float fFit = (float) (db.getWidth() - 8) / (float) pw;                                             // never wider than the display
+    const float fRef = juce::jmin ((float) db.getWidth() / 960.0f, (float) db.getHeight() / 534.0f);       // proportional to the window
+    const float f = juce::jlimit (0.4f, 1.5f, juce::jmin (fFit, fRef));
     const float vw = (float) pw * f, vh = (float) ph * f;
     const int x = db.getX() + juce::roundToInt (((float) db.getWidth() - vw) * 0.5f);
     const int yBottom = db.getBottom() - juce::roundToInt (vh) - 20 - (proc.apvts.getRawParameterValue ("notes")->load() > 0.5f ? 44 : 0), yTop = db.getY() + 6;
@@ -2198,7 +2430,9 @@ void RajvikEQAudioProcessorEditor::placePanel()
     if (covers (bottomR))   panelOnTop = true;
     else if (covers (topR)) panelOnTop = false;
 
-    panel.setBounds (x, panelOnTop ? yTop : yBottom, pw, ph);
+    const int y = panelOnTop ? yTop : yBottom;
+    panel.setTransform (juce::AffineTransform::scale (f, f, (float) x, (float) y));
+    panel.setBounds (x, y, pw, ph);
 }
 
 void RajvikEQAudioProcessorEditor::paint (juce::Graphics& g)
@@ -2242,26 +2476,37 @@ void RajvikEQAudioProcessorEditor::resized()
 void RajvikEQAudioProcessorEditor::layoutRoot()
 {
     auto r = root.getLocalBounds();
-
     auto hdr = r.removeFromTop (headerH);
-    // preset section on the right, next to the settings icon: [<] [preset name] [>] [Save] [Tools] [gear]
-    gearBtn.setBounds (hdr.getRight() - 38, 4, 30, 26);
-    int hx = hdr.getRight() - 38 - 6;
-    toolsBtn.setBounds (hx - 78, 5, 78, 24);          hx -= 78 + 10;
-    presetSave.setBounds (hx - 48, 5, 48, 24);        hx -= 48 + 4;
-    presetNext.setBounds (hx - 22, 5, 22, 24);        hx -= 22 + 2;
-    const int pbw = juce::jlimit (70, 170, hx - 150 - 24 - 2);   // keep the logo free on small windows
-    presetBtn.setBounds (hx - pbw, 5, pbw, 24);       hx -= pbw + 2;
-    presetPrev.setBounds (hx - 22, 5, 22, 24);
+
+    // left: logo, undo / redo, A/B compare
+    int x = 138;
+    undoBtn.setBounds (x, 5, 42, 24);  x += 44;
+    redoBtn.setBounds (x, 5, 42, 24);  x += 52;
+    slotA.setBounds (x, 5, 26, 24);    x += 28;
+    slotB.setBounds (x, 5, 26, 24);    x += 30;
+    copyBtn.setBounds (x, 5, 42, 24);
+
+    // right: presets (arrows, name, save) next to Tools and the settings icon
+    int rx = hdr.getRight() - 8;
+    gearBtn.setBounds (rx - 30, 4, 30, 26);          rx -= 36;
+    toolsBtn.setBounds (rx - 70, 5, 70, 24);         rx -= 78;
+    presetSave.setBounds (rx - 46, 5, 46, 24);       rx -= 50;
+    presetNext.setBounds (rx - 22, 5, 22, 24);       rx -= 24;
+    presetBtn.setBounds (rx - 130, 5, 130, 24);      rx -= 132;
+    presetPrev.setBounds (rx - 22, 5, 22, 24);
 
     auto bot = r.removeFromBottom (bottomH).reduced (8, 2);
-    modeBox.setBounds (bot.removeFromLeft (124));  bot.removeFromLeft (6);
-    osL.setBounds (bot.removeFromLeft (88));
-    osBox.setBounds (bot.removeFromLeft (58));  bot.removeFromLeft (8);
-    analyzerBtn.setBounds (bot.removeFromLeft (88));
-    pianoBtn.setBounds (bot.removeFromLeft (70));
-    outSlider.setBounds (bot.removeFromRight (juce::jlimit (90, 300, bot.getWidth() - 52)));
-    outL.setBounds (bot.removeFromRight (50));
+    modeBox.setBounds (bot.removeFromLeft (112));  bot.removeFromLeft (6);
+    osL.setBounds (bot.removeFromLeft (80));
+    osBox.setBounds (bot.removeFromLeft (52));  bot.removeFromLeft (8);
+    pianoBtn.setBounds (bot.removeFromLeft (68));
+    outSlider.setBounds (bot.removeFromRight (juce::jlimit (100, 200, bot.getWidth() / 4)));
+    outL.setBounds (bot.removeFromRight (44));
+    bot.removeFromRight (6);
+    scaleBtn.setBounds (bot.removeFromRight (50));
+    bot.removeFromRight (6);
+    anaBox.setBounds (bot.removeFromRight (130));
+    nameBtn.setBounds (bot.reduced (8, 0).withSizeKeepingCentre (juce::jmax (0, juce::jmin (200, bot.getWidth() - 16)), bot.getHeight()));
 
     auto stripArea = r.removeFromRight (stripW);
     display.setBounds (r);

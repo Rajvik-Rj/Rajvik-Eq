@@ -8,20 +8,20 @@
 class Analyzer
 {
 public:
-    static constexpr int size = 16384;
+    static constexpr int size = 32768;
     void push (const float* l, const float* r, int n)
     {
         int w = wpos.load (std::memory_order_relaxed);
         for (int i = 0; i < n; ++i) { ringL[(size_t) w] = l[i]; ringR[(size_t) w] = r[i]; w = (w + 1) & (size - 1); }
         wpos.store (w, std::memory_order_release);
     }
-    // the newest n samples (n <= size), oldest first
-    void snapshot (float* outL, float* outR, int n) const
+    // n samples (n + delay <= size), oldest first, ending `delay` samples before the newest one
+    void snapshot (float* outL, float* outR, int n, int delay = 0) const
     {
         const int w = wpos.load (std::memory_order_acquire);
         for (int i = 0; i < n; ++i)
         {
-            const size_t idx = (size_t) ((w - n + i) & (size - 1));
+            const size_t idx = (size_t) ((w - delay - n + i) & (size - 1));
             outL[i] = ringL[idx];
             outR[i] = ringR[idx];
         }
@@ -73,6 +73,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     Analyzer preAnalyzer, postAnalyzer;
     std::array<std::atomic<float>, RP::numBands> dynDb;
+    std::atomic<int> latencyNow { 0 };   // reported plug-in latency in samples (the editor aligns the input spectrum with the output)
     std::atomic<int> soloBand { -1 };   // band being soloed (-1 = none); not saved with the project, set from the editor
     std::atomic<float> peakL { 0.0f }, peakR { 0.0f };   // output peaks for the level meters
 

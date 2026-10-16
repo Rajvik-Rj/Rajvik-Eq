@@ -52,24 +52,21 @@ private:
     float yToGain (float y) const;
     float dispRange() const;
     void timerCallback() override;
-    // Two resolutions per analyzer: 'lo' = the chosen FFT size (fine bass detail), 'hi' = a 4x shorter FFT (fast, reacts to
-    // the sound immediately in mids / highs). They are cross-faded by frequency, like a multi-resolution analyzer.
-    struct Spec { std::vector<float> lo, hi; std::vector<double> cLo, cHi; };   // dB per bin + running sums of linear power
-    using SpecArr = Spec;
-    void updateSpectrum (const Analyzer&, SpecArr&, float dt);
-    void computeSpectrum (SpecArr&, float dt);
-    void initSpec (SpecArr&) const;
-    float fastWeight (float freq) const;
-    void paintGrid (juce::Graphics&);
-    void paintCurves (juce::Graphics&);
-    std::vector<float> gridKeyNow (float scale) const;
-    std::vector<float> curveKeyNow (float scale) const;
-    void drawCached (juce::Graphics&, juce::Image&, std::vector<float>& cachedKey, const std::vector<float>& key, float scale, bool curves);
+    using SpecArr = std::vector<float>;   // dBFS per FFT bin (smoothed)
+    struct Spec { SpecArr lo, hi; };      // lo: chosen resolution (bass detail), hi: 2048 / 4096 point FFT (fast, same scale as the spectral stage)
+    void updateSpectrum (const Analyzer&, Spec&, int delaySamples);
+    void computeSpectrum (Spec&);
+    void computeBins (const float* l, const float* r, int n, juce::dsp::FFT&, const std::vector<float>& window, SpecArr& out);
     void configureAnalyzer();
     void toolSpectrum();
-    void drawSpectrum (juce::Graphics&, const SpecArr&, juce::Colour, float alpha, bool filled);
-    float spectrumDbAt (const SpecArr&, float x) const;           // incl. tilt
-    float binsDbAt (const std::vector<float>& bins, const std::vector<double>& cum, int fftSize, float x) const;   // no tilt
+    void buildLevels (const Spec&, std::vector<float>&) const;
+    void drawLevels (juce::Graphics&, const std::vector<float>&, juce::Colour fillCol, float fillAlpha, juce::Colour lineCol, float lineAlpha, float lineW);
+    void updatePeakLabels();
+    void renderBackground (juce::Image&, float scale);
+    double frameSignature() const;
+    float spectrumDbAt (const Spec&, float x) const;                   // incl. tilt
+    float binsDbAt (const float* bins, int fftSize, float x) const;   // no tilt
+    float anaY (float db) const;
     float anaRange() const;
     float anaTilt() const;
 
@@ -94,28 +91,33 @@ private:
     void finishSketch();
     void fitToTarget (std::vector<float> residual, int maxBands);
     int freeBand() const;
-    SpecArr preSm, postSm, overlaySm;
-    std::vector<float> snapL, snapR, fftData, powBuf, win, toolWin;
-    std::unique_ptr<juce::dsp::FFT> fft, fftFast;
-    std::vector<float> winFast, powFast;
-    int fastN = 1024;
-    double lastTick = 0.0;
-    juce::Image gridImg, curveImg;                 // cached static layers (grid, EQ curves): rebuilt only when something changes
-    std::vector<float> gridKey, curveKey;
+    Spec preSm, postSm, overlaySm;
+    std::vector<float> lvPre, lvPost, lvOv;      // analyzer level per 2 pixel column (dB, incl. tilt), built once per frame
+    std::vector<juce::Point<float>> peakPts;     // peak label positions
+    juce::Image bgImage;                         // cached background + grid (rendered at the real pixel size)
+    int bgKey = 0;
+    float bgScale = 0.0f, tiltDb = 4.5f, rangeDb = 90.0f, anaDt = 1.0f / 40.0f;
+    double lastSig = 0.0, lastAnaMs = 0.0;
+    int peakTick = 0;
+    std::vector<float> snapL, snapR, fftData, powBuf, winLo, winHi, toolWin;
+    std::unique_ptr<juce::dsp::FFT> fftLo, fftHi;
     juce::dsp::FFT toolFft { 12 };   // fixed 4096 point FFT for Auto Peaks / EQ Match
-    int specN = 0;                   // FFT size of the display analyzer (2048 .. 16384)
+    int specNLo = 0, specNHi = 0;    // FFT sizes of the display analyzer
 };
 
 class ScaleStrip : public juce::Component, private juce::Timer
 {
 public:
-    explicit ScaleStrip (RajvikEQAudioProcessor& p) : proc (p) { startTimerHz (60); }
+    explicit ScaleStrip (RajvikEQAudioProcessor& p) : proc (p) { startTimerHz (30); }
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
     RajvikEQAudioProcessor& proc;
     float lvL = 0.0f, lvR = 0.0f;
+    juce::Rectangle<float> rangeRect { 8.0f, 6.0f, 58.0f, 22.0f };
+    int lastKey = -1;
 };
 
 class BandPanel : public juce::Component
@@ -237,11 +239,21 @@ private:
     void applyLook();
     void resetSize();
     void scaleChanged (float oldScale);
+    void setGuiScale (float s);
+    void showScaleMenu();
     void stepPreset (int dir);
     void promptSave();
+    // undo / redo (snapshots of the whole state, recorded only while you edit) and A/B compare
+    juce::String stateString() const;
+    void applyState (const juce::String&);
+    void trackHistory();
+    void doUndo();
+    void doRedo();
+    void switchSlot (int s);
+    void updateAB();
 
     static constexpr int headerH = 34, bottomH = 26, stripW = 100;
-    static constexpr int minW = 640, minH = 400, maxW = 3200, maxH = 2000;   // unscaled units
+    static constexpr int minW = 720, minH = 400, maxW = 3200, maxH = 2000;   // unscaled units
     RajvikEQAudioProcessor& proc;
     RajvikLAF laf;
     RootView root;
@@ -253,15 +265,31 @@ private:
     juce::ComboBox modeBox, osBox;
     juce::Label outL, osL;
     juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" }, toolsBtn;
+    juce::TextButton undoBtn { "Undo" }, redoBtn { "Redo" }, slotA { "A" }, slotB { "B" }, copyBtn { "Copy" }, scaleBtn { "100%" }, nameBtn;
+    juce::ComboBox anaBox;
+    juce::ToggleButton pianoBtn { "Piano" };
     GearButton gearBtn;
-    juce::ToggleButton analyzerBtn { "Analyzer" }, pianoBtn { "Piano" };
     juce::Slider outSlider;
+
+    std::vector<juce::String> undoStack, redoStack;
+    juce::String lastSnap, abState[2];
+    int abSlot = 0, histTick = 0, nameTick = 0;
+    struct Activity : juce::MouseListener   // when did the user last touch the editor (so host automation is not recorded as an edit)
+    {
+        double last = 0.0;
+        void bump() { last = juce::Time::getMillisecondCounterHiRes(); }
+        void mouseDown (const juce::MouseEvent&) override { bump(); }
+        void mouseDrag (const juce::MouseEvent&) override { bump(); }
+        void mouseUp (const juce::MouseEvent&) override { bump(); }
+        void mouseDoubleClick (const juce::MouseEvent&) override { bump(); }
+        void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override { bump(); }
+    } activity;
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
     std::unique_ptr<CA> modeA, osA;
-    std::unique_ptr<BA> analyzerA, pianoA;
+    std::unique_ptr<BA> pianoA;
     std::unique_ptr<SA> outA;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RajvikEQAudioProcessorEditor)

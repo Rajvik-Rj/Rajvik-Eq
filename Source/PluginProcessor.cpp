@@ -140,6 +140,7 @@ void RajvikEQAudioProcessor::updateFlags()
     spectralActive = sp;
     const int osLat = (stage > 0 && os[(size_t) (stage - 1)] != nullptr) ? (int) std::lround (os[(size_t) (stage - 1)]->getLatencyInSamples()) : 0;
     const int lat = (lin ? irLen / 2 : 0) + osLat + (sp ? SpectralStage::N : 0);
+    latencyNow = lat;
     if (lat != getLatencySamples()) setLatencySamples (lat);
 }
 

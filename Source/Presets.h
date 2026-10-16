@@ -22,8 +22,8 @@ struct BandSpec
 struct Factory { juce::String name, category; std::vector<BandSpec> bands; };
 
 inline BandSpec bell (float f, float g, float q) { BandSpec s; s.type = Bell; s.freq = f; s.gain = g; s.q = q; return s; }
-inline BandSpec shelfLo (float f, float g, float q = 0.7f) { BandSpec s; s.type = LowShelf; s.freq = f; s.gain = g; s.q = q; return s; }
-inline BandSpec shelfHi (float f, float g, float q = 0.7f) { BandSpec s; s.type = HighShelf; s.freq = f; s.gain = g; s.q = q; return s; }
+inline BandSpec shelfLo (float f, float g, float q = 1.0f) { BandSpec s; s.type = LowShelf; s.freq = f; s.gain = g; s.q = q; return s; }
+inline BandSpec shelfHi (float f, float g, float q = 1.0f) { BandSpec s; s.type = HighShelf; s.freq = f; s.gain = g; s.q = q; return s; }
 inline BandSpec lowCut (float f, int slope) { BandSpec s; s.type = LowCut; s.freq = f; s.slope = slope; s.q = 0.71f; return s; }
 inline BandSpec highCut (float f, int slope) { BandSpec s; s.type = HighCut; s.freq = f; s.slope = slope; s.q = 0.71f; return s; }
 inline BandSpec notchB (float f, float q) { BandSpec s; s.type = Notch; s.freq = f; s.q = q; return s; }
