@@ -1,6 +1,6 @@
 # RAJVIK Pro EQ
 
-A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - no local setup needed.
+A 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - no local setup needed.
 
 ## Get the plugin
 1. Push this folder to a GitHub repo.
@@ -26,10 +26,10 @@ A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - 
 - Character: Clean / Subtle / Warm, output gain, phase invert
 - Real-time pre/post analyzer, display range 3/6/12/30 dB
 - Frequency range 10 Hz to 20 kHz. "Piano" toggle (bottom bar) shows a piano keyboard strip under the display (one key per semitone on the same frequency axis): the selected band's key lights up with its note name + frequency, and hovering shows the note under the mouse
-- Pro-Q style readout: the selected band always shows its frequency and gain in a bubble next to the node (also while you drag it, wherever you take it); hovering any node shows the same
+- Readout: the selected band always shows its frequency and gain in a bubble next to the node (also while you drag it, wherever you take it); hovering any node shows the same
 - Sidechain: optional second input bus ("Sidechain", mono or stereo). Each Dynamic or Spectral band has a **Sidechain** toggle: its detector then listens to the sidechain input instead of the main signal (works in Zero Latency, Natural and Linear Phase modes). Enable the sidechain input in your DAW's plugin routing.
 - Analyzer: pre (grey line) and post (blue fill) spectrum, 4.5 dB/oct tilt, about 1/12 octave smoothing, and the hover readout also shows the level at the cursor
-- **Multi select (like Pro-Q):** drag a rectangle on empty space, Shift/Ctrl-click to add or remove bands, Ctrl+A for all. Selected bands move together (drag), mouse wheel changes Q of all, arrow keys nudge (Shift = fine), Delete removes them, right-click menu changes type / mode for all. Esc deselects.
+- **Multi select :** drag a rectangle on empty space, Shift/Ctrl-click to add or remove bands, Ctrl+A for all. Selected bands move together (drag), mouse wheel changes Q of all, arrow keys nudge (Shift = fine), Delete removes them, right-click menu changes type / mode for all. Esc deselects.
 - **Presets:** header bar `< Preset > Save`. 14 factory presets (vocal, bass, de-esser, spectral resonance control, sidechain ducking, ...), "My presets" saved as `.rajpreset` files in your user application data folder (`RajvikEQ/Presets`), delete / open folder from the menu. Presets hold the 24 bands only (not output gain or processing mode).
 - **Spectral is purely spectral:** a Spectral band has no static gain and no dynamic-EQ curve. Its node sits on the 0 dB line (move it for frequency, wheel for width), and the display shows the live per-frequency cut it applies. Dynamic bands keep their static gain + gain offset.
 - **Pre / Post analyzer view:** the dropdown next to Analyzer shows the input spectrum (Pre), the output spectrum (Post) or both.
@@ -38,7 +38,7 @@ A Pro-Q 4 style 24-band equalizer, VST3 (JUCE / C++). Built on GitHub Actions - 
 
 ## Look and mouse
 Modern dark UI: purple-charcoal background, full-width response display with a glowing gold curve, glowing band nodes, dB scale + level meters on the right, mode/character/output in the bottom bar.
-Double-click empty area to add a band. Click a band and a Pro-Q style panel opens, docked at the bottom centre: power, type + slope, FREQ / GAIN / Q knobs, stereo placement, band stepper (< >), Dynamic toggle (expands Threshold / Range / Attack / Release + Spectral), close (x). Click empty space or x to close it. Hover shows the frequency under the cursor.
+Double-click empty area to add a band. Click a band and a panel opens, docked at the bottom centre: power, type + slope, FREQ / GAIN / Q knobs, stereo placement, band stepper (< >), Dynamic toggle (expands Threshold / Range / Attack / Release + Spectral), close (x). Click empty space or x to close it. Hover shows the frequency under the cursor.
 
 ## Current limits (honest list)
 - Linear Phase: static Stereo/Left/Right bands are true linear phase; dynamic and Mid/Side bands run as normal filters after the FIR.
@@ -73,7 +73,7 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - **Solo** button in the band panel (next to the close button), also *Solo band* in the right-click menu of a band. You hear only the region that band affects: band-pass at its frequency and Q (low-pass for low shelf / low cut, high-pass for high shelf / high cut), respecting Left / Right / Mid / Side placement. Switching is crossfaded (10 ms).
 - Solo is a monitoring aid: it is not saved, it ends when the editor closes or the band is switched off, and the display shows "SOLO band N" while active.
 
-## v6: new analyzer (Pro-Q style)
+## v6: new analyzer 
 - **Calibrated:** a full scale sine reads 0 dB (within the 1.4 dB scalloping of the Hann window). Left and right are analyzed separately and their power is averaged (a mono sum hides or invents peaks through phase cancellation).
 - **Scale:** 0 dBFS at the top, range 60 / 90 / 120 dB (default 90) with its own dB labels on the left. Before, the analyzer was squeezed into a 80 dB window that reached the top of the panel.
 - **Settings (gear > Analyzer):** View (Pre / Post / Both), Range, **Resolution** (Low 2048 / Medium 4096 / High 8192 / Maximum 16384 point FFT), **Speed** (release: very slow .. very fast), **Tilt** (0 / 1.5 / 3 / 4.5 / 6 dB per octave around 1 kHz, default 4.5), **Freeze**.
@@ -95,5 +95,19 @@ Double-click empty area to add a band. Click a band and a Pro-Q style panel open
 - **Threshold display:** the dashed line now uses the analyzer's dB scale (0 dBFS on top). A solid white marker shows the live band level the detector measures: when it is above the dashed line the band reacts. The analyzer curve itself is per bin and tilted, so compare the threshold with the marker, not with the curve.
 - **Spectral bands honour Left / Right / Mid / Side placement** (detector and cut).
 - **Window resize fixed:** the band panel's position was scaled together with its size, so it slid out of the window when the window was resized. It now stays inside the display at every size. Window size 480 x 300 up to 4000 x 2400 (unscaled); the bottom bar hides its less important items on narrow windows instead of overlapping.
-- **Double click near the edges (like Pro-Q):** double click below about 30 Hz adds a Low Cut (high pass) at the clicked frequency, above about 13 kHz a High Cut (low pass) at the clicked frequency (12 dB/oct, change the slope in the panel). Anywhere else: Bell.
+- **Double click near the edges :** double click below about 30 Hz adds a Low Cut (high pass) at the clicked frequency, above about 13 kHz a High Cut (low pass) at the clicked frequency (12 dB/oct, change the slope in the panel). Anywhere else: Bell.
 - Factory presets with Dynamic / Spectral bands got new thresholds for the unified detector.
+
+## v9: new look
+- Own visual identity: Deep Teal / Mint default theme, diamond band nodes, flat panel with a coloured edge bar, new dot-ring knobs.
+- Knobs are about 25 % smaller; the band panel is smaller and lower (132 px instead of 156 px, 480 / 760 px wide).
+
+## v10: black look, docked band strip
+- Default look is now black (new "Black" background, white accent; every other colour and background is still in the settings menu).
+- The band properties are no longer a floating panel: they sit in a slim strip docked at the bottom, directly above the bottom bar (Zero latency / oversampling / analyzer / piano / output). The strip keeps its place, scales with the window and shows Enable, prev / next band, type, slope, Freq, Gain, Q, placement, mode, Solo and Close; the Dynamic / Spectral controls (sidechain, direction, Threshold, Range, Attack, Release) appear in the same row.
+
+## v11: screenshot look, band strip beside the meters, EQ range from the meter section
+- Look follows the reference screenshot: Midnight background + gold accent (default), round band nodes, rounded band strip with the knobs centred and each knob's name and value to its right.
+- The band strip is docked under the display and ends at the left edge of the meter section (it no longer runs under the meters). It scales with the window.
+- Click the meter / scale section (the range badge or anywhere on it) to choose the EQ range: +/-3, 6, 12, 18, 24, 30, 36 or 48 dB. The mouse wheel over the section also steps the range. The same list is in the settings menu ("Display Range"). Default 12 dB.
+- The analyzer dB numbers on the meter section now follow the analyzer range setting.
