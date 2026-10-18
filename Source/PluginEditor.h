@@ -106,14 +106,23 @@ private:
     int specN = 0;                   // FFT size of the display analyzer (2048 .. 16384)
 };
 
-class ScaleStrip : public juce::Component, private juce::Timer
+class ScaleStrip : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
 {
 public:
-    explicit ScaleStrip (RajvikEQAudioProcessor& p) : proc (p) { startTimerHz (60); }
+    explicit ScaleStrip (RajvikEQAudioProcessor& p) : proc (p)
+    {
+        setMouseCursor (juce::MouseCursor::PointingHandCursor);
+        setTooltip ("Click to choose the EQ range (+/- dB shown by the display)");
+        startTimerHz (60);
+    }
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
     void timerCallback() override;
+    int rangeIndex() const;
+    void setRangeIndex (int i);
     RajvikEQAudioProcessor& proc;
     float lvL = 0.0f, lvR = 0.0f;
 };
@@ -122,7 +131,7 @@ class BandPanel : public juce::Component
 {
 public:
     explicit BandPanel (RajvikEQAudioProcessor&);
-    static constexpr int totalHeight = 156;
+    static constexpr int totalHeight = 80;
 
     std::function<void()> onClose;
     std::function<void (int)> onStep;
@@ -132,7 +141,7 @@ public:
     bool isGroupMode() const { return groupMode; }
     void update();            // re-layout when the band type / dynamic state changes
     int idealWidth() const;   // component width including the soft shadow margin
-    bool hitTest (int x, int y) override { return getLocalBounds().reduced (12, 10).contains (x, y); }
+    bool hitTest (int x, int y) override { return getLocalBounds().contains (x, y); }
     void paint (juce::Graphics&) override;
     void resized() override;
 
@@ -249,6 +258,8 @@ private:
     ScaleStrip strip;
     BandPanel panel;
     bool panelOnTop = false, panelOpen = false;
+    juce::Rectangle<int> dockRect;   // the band strip docked above the bottom bar
+    float dockScale = 1.0f;
 
     juce::ComboBox modeBox, osBox;
     juce::Label outL, osL;

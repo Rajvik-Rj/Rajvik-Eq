@@ -7,7 +7,7 @@ namespace
 {
 juce::Colour bandColour (int b)
 {
-    return juce::Colour::fromHSV (std::fmod (0.08f + (float) b * 0.381966f, 1.0f), 0.65f, 0.95f, 1.0f);
+    return juce::Colour::fromHSV (std::fmod (0.08f + (float) b * 0.381966f, 1.0f), 0.55f, 1.0f, 1.0f);
 }
 }
 
@@ -23,8 +23,7 @@ EQDisplay::EQDisplay (RajvikEQAudioProcessor& p) : proc (p)
 
 float EQDisplay::dispRange() const
 {
-    static const float r[] = { 3.0f, 6.0f, 12.0f, 30.0f };
-    return r[juce::jlimit (0, 3, (int) apvtsVal ("disp_range"))];
+    return RP::rangeValues[juce::jlimit (0, RP::numRanges - 1, (int) apvtsVal ("disp_range"))];
 }
 float EQDisplay::anaRange() const
 {
@@ -271,7 +270,7 @@ float EQDisplay::fastWeight (float f) const
     return t * t * (3.0f - 2.0f * t);
 }
 
-// incl. the analyzer tilt (dB per octave around 1 kHz, like the Pro-Q "Tilt" setting)
+// incl. the analyzer tilt (dB per octave around 1 kHz, "Tilt" setting)
 float EQDisplay::spectrumDbAt (const SpecArr& sm, float x) const
 {
     const float f = juce::jmax (10.0f, xToFreq (x));
@@ -326,7 +325,7 @@ void EQDisplay::paintGrid (juce::Graphics& g)
         g.drawText (f >= 1000 ? juce::String (f / 1000) + "k" : juce::String ((int) f), juce::jmin ((int) x - 20, (int) w - 40), (int) h - 18, 40, 14, juce::Justification::centred);
     }
     const float range = dispRange();
-    const float step = range <= 3.0f ? 1.0f : range <= 6.0f ? 2.0f : range <= 12.0f ? 3.0f : 10.0f;
+    const float step = RP::rangeStep (range);
     for (float gdb = -range; gdb <= range + 0.01f; gdb += step)
     {
         g.setColour (juce::Colours::white.withAlpha (std::abs (gdb) < 0.01f ? 0.16f : 0.045f));
@@ -696,7 +695,7 @@ void EQDisplay::paint (juce::Graphics& g)
         g.drawRect (mqRect, 1.0f);
     }
 
-    // Pro-Q style readout next to the node: always for the selected band (also while dragging), and for the node under the mouse
+    // Readout next to the node: always for the selected band (also while dragging), and for the node under the mouse
     {
         const int hov = (hoverX >= 0.0f && ! dragging) ? hitTest ({ hoverX, hoverY }) : -1;
         for (int b : { hov == selected ? -1 : hov, selected })
@@ -867,7 +866,7 @@ void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
     if (h >= 0) { setIndex (pid (h, "en"), 0); repaint(); return; }
 
     const float clickF = juce::jlimit (10.0f, 20000.0f, xToFreq (e.position.x));
-    // Like Pro-Q: a double click close to the left edge (about 20 Hz) makes a Low Cut (high pass) at that frequency,
+    // A double click close to the left edge (about 20 Hz) makes a Low Cut (high pass) at that frequency,
     // close to the right edge (about 20 kHz) a High Cut (low pass) at that frequency, anywhere else a Bell.
     const bool lowEdge = clickF <= 30.0f, highEdge = clickF >= 13000.0f;
     for (int b = 0; b < numBands; ++b)
@@ -877,7 +876,7 @@ void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
         setIndex (pid (b, "dyn"), 0);
         setIndex (pid (b, "spec"), 0);
         setIndex (pid (b, "place"), Stereo);
-        setIndex (pid (b, "slope"), 1);   // 12 dB/oct, the Pro-Q default
+        setIndex (pid (b, "slope"), 1);   // 12 dB/oct default
         setReal (pid (b, "q"), 1.0f);
         setReal (pid (b, "freq"), clickF);
         setReal (pid (b, "gain"), (lowEdge || highEdge) ? 0.0f : juce::jlimit (-30.0f, 30.0f, yToGain (e.position.y)));
@@ -1170,18 +1169,22 @@ void EQDisplay::showInstances()
 void BandPanel::Knob::init (juce::Component& parent, const juce::String& name, bool bipolar)
 {
     s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 74, 16);
+    s.getProperties().set ("valueLeft", true);
+    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 62, 20);
     if (bipolar) s.getProperties().set ("bipolar", true);
-    l.setText (name, juce::dontSendNotification);
-    l.setJustificationType (juce::Justification::centred);
-    l.setFont (juce::Font (juce::FontOptions (11.0f)));
+    l.setText (name.toUpperCase(), juce::dontSendNotification);
+    l.setJustificationType (juce::Justification::centredLeft);
+    l.setFont (juce::Font (juce::FontOptions (10.5f)));
+    l.setInterceptsMouseClicks (false, false);
     parent.addAndMakeVisible (s);
     parent.addAndMakeVisible (l);
 }
+
 void BandPanel::Knob::place (juce::Rectangle<int> r)
 {
-    l.setBounds (r.removeFromTop (14));
     s.setBounds (r);
+    const int kd = juce::jmin (r.getWidth() - 62, r.getHeight());
+    l.setBounds (r.getX() + kd + 5, r.getCentreY() - 23, 62, 13);   // label sits above the value, to the right of the knob
 }
 
 BandPanel::BandPanel (RajvikEQAudioProcessor& p) : proc (p)
@@ -1265,7 +1268,7 @@ bool BandPanel::isCut() const
     const int t = (int) proc.apvts.getRawParameterValue (pid (band, "type"))->load();
     return t == LowCut || t == HighCut;
 }
-int BandPanel::idealWidth() const { return dynOn() ? 878 : 550; }
+int BandPanel::idealWidth() const { return 1220; }
 
 void BandPanel::select (int b)
 {
@@ -1545,56 +1548,57 @@ void BandPanel::refreshGroupControls()
 
 void BandPanel::paint (juce::Graphics& g)
 {
-    const auto body = getLocalBounds().reduced (12, 10);
-    juce::DropShadow (juce::Colours::black.withAlpha (0.55f), 16, { 0, 5 }).drawForRectangle (g, body);
-    const auto r = body.toFloat();
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xf52d2a38), 0.0f, r.getY(), juce::Colour (0xf51a1822), 0.0f, r.getBottom(), false));
-    g.fillRoundedRectangle (r, 16.0f);
+    const auto r = getLocalBounds().toFloat().reduced (3.0f, 2.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.045f));
+    g.fillRoundedRectangle (r, 12.0f);
     g.setColour (juce::Colours::white.withAlpha (0.10f));
-    g.drawRoundedRectangle (r.reduced (0.5f), 16.0f, 1.0f);
-    g.setColour ((groupMode ? Look::gold : bandColour (band)).withAlpha (0.8f));
-    g.drawLine (r.getX() + 34.0f, r.getY() + 1.0f, r.getRight() - 34.0f, r.getY() + 1.0f, 1.5f);
+    g.drawRoundedRectangle (r.reduced (0.5f), 12.0f, 1.0f);
 }
 
 void BandPanel::resized()
 {
-    const auto body = getLocalBounds().reduced (12, 10);
-    closeBtn.setBounds (body.getRight() - 32, body.getY() + 8, 22, 22);
-    soloBtn.setBounds (body.getRight() - 32 - 6 - 46, body.getY() + 7, 46, 24);
-    auto r = body.reduced (16, 12);
+    auto r = getLocalBounds().reduced (18, 10);   // 60 px high content row
+    const bool dyn = dynOn();
+    const bool cut = slopeBox.isVisible();
 
-    auto rightCol = r.removeFromRight (120);
-    rightCol.removeFromTop (30);
-    placeBox.setBounds (rightCol.removeFromTop (26));
-    rightCol.removeFromTop (6);
-    dynModeBox.setBounds (rightCol.removeFromTop (26));
+    // right cluster: Mode | Placement | Solo | close
+    auto rc = r.removeFromRight (224).withSizeKeepingCentre (224, 28);
+    closeBtn.setBounds (rc.removeFromRight (22));
+    rc.removeFromRight (4);
+    soloBtn.setBounds (rc.removeFromRight (44));
+    rc.removeFromRight (4);
+    placeBox.setBounds (rc.removeFromRight (72));
+    rc.removeFromRight (4);
+    dynModeBox.setBounds (rc.removeFromRight (76));
 
-    auto left = r.removeFromLeft (112);
-    auto row = left.removeFromTop (24);
-    enBtn.setBounds (row.removeFromLeft (24));
-    row.removeFromLeft (4);
-    prevBtn.setBounds (row.removeFromLeft (20));
-    nextBtn.setBounds (row.removeFromRight (20));
-    numLabel.setBounds (row);
-    left.removeFromTop (6);
-    typeBox.setBounds (left.removeFromTop (28));
-    left.removeFromTop (4);
-    slopeBox.setBounds (left.removeFromTop (24));
-    r.removeFromLeft (6);
+    // left cluster: enable | band number (with < >) | type | slope
+    auto lc = r.removeFromLeft (cut ? 270 : 186).withSizeKeepingCentre (cut ? 270 : 186, 28);
+    enBtn.setBounds (lc.removeFromLeft (28));
+    lc.removeFromLeft (4);
+    prevBtn.setBounds (lc.removeFromLeft (18));
+    numLabel.setBounds (lc.removeFromLeft (28));
+    nextBtn.setBounds (lc.removeFromLeft (18));
+    lc.removeFromLeft (8);
+    typeBox.setBounds (lc.removeFromLeft (84));
+    lc.removeFromLeft (4);
+    slopeBox.setBounds (lc.removeFromLeft (76));
 
-    freq.place (r.removeFromLeft (76).withSizeKeepingCentre (76, 88));
-    gain.place (r.removeFromLeft (100));
-    q.place    (r.removeFromLeft (76).withSizeKeepingCentre (76, 88));
-
-    if (dynOn())
+    // knobs: one centred group between the two clusters
+    const int cellS = 104, cellD = 94, scW = 66;
+    const int groupW = 3 * cellS + (dyn ? 10 + scW + 4 * cellD : 0);
+    auto g = r.withSizeKeepingCentre (juce::jmin (groupW, r.getWidth()), 60);
+    freq.place (g.removeFromLeft (cellS));
+    gain.place (g.removeFromLeft (cellS));
+    q.place    (g.removeFromLeft (cellS));
+    if (dyn)
     {
-        r.removeFromLeft (8);
-        auto tcol = r.removeFromLeft (88);
-        scBtn.setBounds (tcol.removeFromTop (24));
+        g.removeFromLeft (10);
+        auto tcol = g.removeFromLeft (scW).withSizeKeepingCentre (scW, 56);
+        scBtn.setBounds (tcol.removeFromTop (26));
         tcol.removeFromTop (4);
         dirBox.setBounds (tcol.removeFromTop (26));
         for (auto* k : { &thr, &range, &att, &rel })
-            k->place (r.removeFromLeft (58).withSizeKeepingCentre (58, 80));
+            k->place (g.removeFromLeft (cellD));
     }
 }
 
@@ -1607,6 +1611,37 @@ void ScaleStrip::timerCallback()
     repaint();
 }
 
+int ScaleStrip::rangeIndex() const
+{
+    return juce::jlimit (0, RP::numRanges - 1, (int) proc.apvts.getRawParameterValue ("disp_range")->load());
+}
+
+void ScaleStrip::setRangeIndex (int i)
+{
+    if (auto* p = proc.apvts.getParameter ("disp_range"))
+    {
+        p->beginChangeGesture();
+        p->setValueNotifyingHost (p->convertTo0to1 ((float) juce::jlimit (0, RP::numRanges - 1, i)));
+        p->endChangeGesture();
+    }
+}
+
+void ScaleStrip::mouseDown (const juce::MouseEvent&)
+{
+    juce::PopupMenu m;
+    m.addSectionHeader ("EQ range");
+    for (int i = 0; i < RP::numRanges; ++i)
+        m.addItem (i + 1, "+/- " + RP::rangeNames[i], true, i == rangeIndex());
+    juce::Component::SafePointer<ScaleStrip> sp (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [sp] (int r) { if (sp != nullptr && r > 0) sp->setRangeIndex (r - 1); });
+}
+
+void ScaleStrip::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& w)
+{
+    if (w.deltaY > 0.0f) setRangeIndex (rangeIndex() - 1);      // wheel up: zoom in
+    else if (w.deltaY < 0.0f) setRangeIndex (rangeIndex() + 1);
+}
+
 void ScaleStrip::paint (juce::Graphics& g)
 {
     const float h = (float) getHeight();
@@ -1615,25 +1650,37 @@ void ScaleStrip::paint (juce::Graphics& g)
     g.setColour (juce::Colours::white.withAlpha (0.07f));
     g.drawVerticalLine (0, 0.0f, h);
 
-    static const float ranges[] = { 3.0f, 6.0f, 12.0f, 30.0f };
-    const float range = ranges[juce::jlimit (0, 3, (int) proc.apvts.getRawParameterValue ("disp_range")->load())];
-    const float step = range <= 3.0f ? 1.0f : range <= 6.0f ? 2.0f : range <= 12.0f ? 3.0f : 10.0f;
+    const float range = RP::rangeValues[rangeIndex()];
+    const float step = RP::rangeStep (range);
+
+    // range badge: click it (or anywhere on this strip) to pick the EQ range
+    {
+        const auto badge = juce::Rectangle<float> (8.0f, 8.0f, 58.0f, 22.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
+        g.fillRoundedRectangle (badge, 6.0f);
+        g.setColour (Look::gold);
+        g.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
+        g.drawText (RP::rangeNames[rangeIndex()], badge.toNearestInt(), juce::Justification::centred);
+    }
 
     g.setFont (juce::Font (juce::FontOptions (12.5f)));
     for (float gdb = range - step; gdb >= -range - 0.01f; gdb -= step)
     {
         const float y = juce::jlimit (8.0f, h - 8.0f, h * 0.5f * (1.0f - gdb / range));
+        if (y < 36.0f && std::abs (gdb) > 0.01f) continue;   // keep clear of the badge
         g.setColour (Look::gold.withAlpha (std::abs (gdb) < 0.01f ? 1.0f : 0.85f));
         g.drawText ((gdb > 0.01f ? "+" : "") + juce::String ((int) std::lround (gdb)), 2, (int) y - 8, 40, 16, juce::Justification::centredRight);
     }
 
     if (proc.apvts.getRawParameterValue ("analyzer")->load() > 0.5f)
     {
+        static const float ar[] = { 60.0f, 90.0f, 120.0f };
+        const float R = ar[juce::jlimit (0, 2, (int) proc.apvts.getRawParameterValue ("ana_range")->load())];
         g.setColour (juce::Colours::white.withAlpha (0.40f));
-        for (int db = -30; db >= -100; db -= 10)
+        for (float db = -10.0f; db > -R + 5.0f; db -= 20.0f)
         {
-            const float y = juce::jlimit (8.0f, h - 8.0f, h * (1.0f - ((float) db + 100.0f) / 80.0f));
-            g.drawText (juce::String (db), 44, (int) y - 8, 32, 16, juce::Justification::centredRight);
+            const float y = juce::jlimit (8.0f, h - 8.0f, h * (1.0f - (db + R) / R));
+            g.drawText (juce::String ((int) db), 44, (int) y - 8, 32, 16, juce::Justification::centredRight);
         }
     }
 
@@ -1760,7 +1807,7 @@ public:
         anaResBox.addItemList (RP::anaResNames, 1);
         anaSpeedBox.addItemList (RP::anaSpeedNames, 1);
         anaTiltBox.addItemList (RP::anaTiltNames, 1);
-        anaResBox.setTooltip ("Higher resolution = more precise lows, but slower reaction (like Pro-Q)");
+        anaResBox.setTooltip ("Higher resolution = more precise lows, but slower reaction");
         anaTiltBox.setTooltip ("Spectrum tilt in dB per octave around 1 kHz. 4.5 dB/oct makes typical music look flat");
         for (auto* c : std::initializer_list<juce::Component*> { &charBox, &rangeBox, &anaViewBox, &anaRangeBox, &anaResBox, &anaSpeedBox, &anaTiltBox,
                                                                  &analyzerBtn, &notesBtn, &invertBtn, &freezeBtn })
@@ -1826,12 +1873,12 @@ public:
         int y = 36;
         labels.push_back ({ "GUI colour", { x0, y, 200, 16 } });
         y += 18;
-        for (size_t i = 0; i < accentSw.size(); ++i) accentSw[i]->setBounds (x0 + (int) i * 30, y, 28, 28);
-        customSw.setBounds (x0 + (int) accentSw.size() * 30, y, 28, 28);
+        for (size_t i = 0; i < accentSw.size(); ++i) accentSw[i]->setBounds (x0 + (int) i * 26, y, 24, 24);
+        customSw.setBounds (x0 + (int) accentSw.size() * 26, y, 24, 24);
         y += 38;
         labels.push_back ({ "Background", { x0, y, 200, 16 } });
         y += 18;
-        for (size_t i = 0; i < themeSw.size(); ++i) themeSw[i]->setBounds (x0 + (int) i * 30, y, 28, 28);
+        for (size_t i = 0; i < themeSw.size(); ++i) themeSw[i]->setBounds (x0 + (int) i * 26, y, 24, 24);
         y += 38;
         labels.push_back ({ "GUI size", { x0, y, 200, 16 } });
         y += 18;
@@ -2180,7 +2227,7 @@ void RajvikEQAudioProcessorEditor::promptSave()
     }), true);
 }
 
-// Pro-Q style: the band panel opens when a band is clicked and docks at the bottom centre of the display
+// The band panel opens when a band is clicked and docks at the bottom centre of the display
 // (it hops to the top when the selected node would be hidden behind it).
 void RajvikEQAudioProcessorEditor::placePanel()
 {
@@ -2195,37 +2242,12 @@ void RajvikEQAudioProcessorEditor::placePanel()
     else if (panel.isGroupMode()) panel.select (b);          // selection shrank back to one band
     panel.update();
 
-    // the whole band panel (knobs, gain, Q, boxes, text) scales with the window: smaller windows shrink it, bigger ones enlarge it
-    const auto db = display.getBounds();
-    const int pw = panel.idealWidth(), ph = BandPanel::totalHeight;
-    const float notesH = proc.apvts.getRawParameterValue ("notes")->load() > 0.5f ? 44.0f : 0.0f;
-    const float availW = (float) db.getWidth() - 8.0f;
-    const float availH = (float) db.getHeight() - 26.0f - notesH;
-    // scale of the whole band panel: follows the window both ways (smaller window = smaller panel, bigger window = bigger panel)
-    // and is always capped so the panel fits completely inside the display, even at the smallest window size
-    const float fit  = juce::jmin (availW / (float) pw, availH * 0.80f / (float) ph);
-    const float grow = juce::jmin ((float) db.getWidth() / 960.0f, (float) db.getHeight() / 540.0f);   // 1.0 at the default window size
-    const float f = juce::jlimit (0.2f, 2.4f, juce::jmin (fit, juce::jmax (0.5f, grow)));
-    const float vw = (float) pw * f, vh = (float) ph * f;
-    const float xf = (float) db.getX() + std::floor (((float) db.getWidth() - vw) * 0.5f);
-    const float yBottomF = (float) db.getBottom() - vh - 20.0f - notesH, yTopF = (float) db.getY() + 6.0f;
-
-    const juce::Rectangle<float> bottomR (xf, yBottomF, vw, vh);
-    const juce::Rectangle<float> topR (xf, yTopF, vw, vh);
-    auto covers = [&] (const juce::Rectangle<float>& r)   // does the panel hide any node of the selection?
-    {
-        const auto area = r.expanded (24.0f);
-        if (multi) { for (int g : grp) if (area.contains (display.getNodePos (g) + db.getPosition().toFloat())) return true; return false; }
-        return area.contains (display.getNodePos (b) + db.getPosition().toFloat());
-    };
-    if (covers (bottomR))   panelOnTop = true;
-    else if (covers (topR)) panelOnTop = false;
-
-    // A component transform is applied around the PARENT's origin (it scales the component's position too), so the panel keeps
-    // its bounds at (0, 0) and the scale + the on-screen position are both put into the transform.
-    const float yF = std::floor (juce::jmax (yTopF, panelOnTop ? yTopF : yBottomF));
-    panel.setBounds (0, 0, pw, ph);
-    panel.setTransform (juce::AffineTransform::scale (f).translated (xf, yF));
+    // docked strip: the panel is laid out at its natural height and scaled so it exactly fills the strip.
+    // (A component transform acts around the PARENT's origin, so bounds stay at (0, 0) and position + scale go into the transform.)
+    const float f = dockScale;
+    const int pw = juce::roundToInt ((float) dockRect.getWidth() / f);
+    panel.setBounds (0, 0, pw, BandPanel::totalHeight);
+    panel.setTransform (juce::AffineTransform::scale (f).translated ((float) dockRect.getX(), (float) dockRect.getY()));
 }
 
 void RajvikEQAudioProcessorEditor::paint (juce::Graphics& g)
@@ -2294,8 +2316,18 @@ void RajvikEQAudioProcessorEditor::layoutRoot()
     outSlider.setBounds (bot.removeFromRight (juce::jlimit (60, 300, bot.getWidth() - (showOutL ? 52 : 0))));
     if (showOutL) outL.setBounds (bot.removeFromRight (50));
 
-    auto stripArea = r.removeFromRight (stripW);
+    // meter / scale section on the right keeps its own column; the band strip is docked under the display only,
+    // so it ends at the left edge of the meter section
+    auto stripCol = r.removeFromRight (stripW);
+    {
+        const float winScale = juce::jlimit (0.5f, 1.8f, juce::jmin ((float) r.getWidth() / 960.0f, (float) r.getHeight() / 480.0f));
+        float f = juce::jmin ((float) r.getWidth() / (float) panel.idealWidth(), winScale);
+        f = juce::jmin (f, ((float) r.getHeight() - 120.0f) / (float) BandPanel::totalHeight);
+        dockScale = juce::jlimit (0.3f, 1.8f, f);
+        const int dockH = (int) std::ceil ((float) BandPanel::totalHeight * dockScale);
+        dockRect = r.removeFromBottom (dockH);
+    }
     display.setBounds (r);
-    strip.setBounds (stripArea);
+    strip.setBounds (stripCol.removeFromTop (r.getHeight()));
     placePanel();
 }

@@ -7,14 +7,14 @@ namespace Look
 inline juce::Colour gold  { 0xfff9c23c };   // the accent colour (name kept: used all over the editor)
 inline juce::Colour text  { 0xffe9e6f2 };
 inline juce::Colour muted { 0xff8f8aa0 };
-inline juce::Colour bgTop { 0xff221e2b };
-inline juce::Colour bgBot { 0xff121016 };
-inline juce::Colour bar   { 0xff0d0c11 };
+inline juce::Colour bgTop { 0xff181824 };
+inline juce::Colour bgBot { 0xff0a0a12 };
+inline juce::Colour bar   { 0xff0e0e16 };
 
 struct Accent { const char* name; juce::uint32 argb; };
 struct Theme  { const char* name; juce::uint32 top, bot, bar; };
 
-constexpr int numAccents = 8, numThemes = 5;
+constexpr int numAccents = 8, numThemes = 6;
 inline const Accent accents[numAccents] =
 {
     { "Gold",   0xfff9c23c }, { "Cyan",   0xff39d0ff }, { "Green",  0xff3ddc97 }, { "Orange", 0xffff8a3d },
@@ -22,6 +22,7 @@ inline const Accent accents[numAccents] =
 };
 inline const Theme themes[numThemes] =
 {
+    { "Midnight",        0xff181824, 0xff0a0a12, 0xff0e0e16 },
     { "Midnight Purple", 0xff221e2b, 0xff121016, 0xff0d0c11 },
     { "Graphite",        0xff2b2d31, 0xff17181b, 0xff101113 },
     { "Deep Blue",       0xff182231, 0xff0c121b, 0xff080d14 },
@@ -189,6 +190,18 @@ public:
         g.setColour (on || hl ? Look::text : Look::muted);
         g.setFont (juce::Font (juce::FontOptions (13.0f)));
         g.drawText (b.getButtonText(), (int) dot.getRight() + 8, 0, b.getWidth() - 22, b.getHeight(), juce::Justification::centredLeft);
+    }
+
+    // knob value boxes of the band strip: bold, left aligned, placed to the right of the knob
+    juce::Label* createSliderTextBox (juce::Slider& sl) override
+    {
+        auto* l = LookAndFeel_V4::createSliderTextBox (sl);
+        if ((bool) sl.getProperties().getWithDefault ("valueLeft", false))
+        {
+            l->setJustificationType (juce::Justification::centredLeft);
+            l->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+        }
+        return l;
     }
 
     void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override

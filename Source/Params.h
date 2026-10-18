@@ -15,14 +15,17 @@ inline const juce::StringArray placementNames { "Stereo", "Left", "Right", "Mid"
 inline const juce::StringArray dirNames       { "Above", "Below" };
 inline const juce::StringArray modeNames      { "Zero Latency", "Natural Phase", "Linear Phase" };
 inline const juce::StringArray osNames        { "Off", "2x", "4x", "8x" };
-// analyzer settings (same idea as the Pro-Q analyzer panel)
+// analyzer settings (analyzer panel)
 inline const juce::StringArray anaRangeNames   { "60 dB", "90 dB", "120 dB" };
 inline const juce::StringArray anaResNames     { "Low", "Medium", "High", "Maximum" };          // FFT 2048 / 4096 / 8192 / 16384
 inline const juce::StringArray anaSpeedNames   { "Very slow", "Slow", "Medium", "Fast", "Very fast" };   // release speed
 inline const juce::StringArray anaTiltNames    { "0 dB/oct", "1.5 dB/oct", "3 dB/oct", "4.5 dB/oct", "6 dB/oct" };
 inline const juce::StringArray charNames      { "Clean", "Subtle", "Warm" };
 inline const juce::StringArray anaViewNames   { "Pre", "Post", "Pre + Post" };
-inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "30 dB" };
+inline const juce::StringArray rangeNames     { "3 dB", "6 dB", "12 dB", "18 dB", "24 dB", "30 dB", "36 dB", "48 dB" };
+inline constexpr float rangeValues[] = { 3.0f, 6.0f, 12.0f, 18.0f, 24.0f, 30.0f, 36.0f, 48.0f };
+inline constexpr int numRanges = 8;
+inline float rangeStep (float range) { return range <= 3.0f ? 1.0f : range <= 6.0f ? 2.0f : range <= 12.0f ? 3.0f : range <= 24.0f ? 6.0f : range <= 30.0f ? 10.0f : 12.0f; }
 
 // "A4 +12c" style note name for a frequency (A4 = 440 Hz)
 inline juce::String noteName (float f)
