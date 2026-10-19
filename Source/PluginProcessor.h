@@ -83,13 +83,18 @@ private:
         bool en, dyn, spec, sc;
         int type, slope, place, dir;
         float freq, gain, q, thr, range, att, rel;
+        int relmode;
+        float relamt, relf, relq, onset;
     };
-    struct BandPtrs { std::atomic<float> *en, *type, *freq, *gain, *q, *slope, *place, *dyn, *spec, *thr, *range, *att, *rel, *dir, *sc; };
+    struct BandPtrs { std::atomic<float> *en, *type, *freq, *gain, *q, *slope, *place, *dyn, *spec, *thr, *range, *att, *rel, *dir, *sc,
+                                         *relamt, *relmode, *relf, *relq, *onset; };
     struct BandState
     {
         RP::BandDesign design;
         RP::Biquad f[16][RP::maxSections];
-        RP::Biquad det;
+        RP::BiquadDD fd[16][RP::maxSections];   // same filters with double-double state (117-bit mode)
+        RP::Biquad det, relDet;
+        double renv = 0.0, renv2 = 0.0, fastE = 0.0, slowE = 0.0, keyRF = 0.0, keyRQ = 0.0, keyRFs = 0.0;
         double env = 0.0, env2 = 0.0, envDb = -120.0, appliedDyn = 0.0, sF = 0.0, sG = 0.0, sQ = 1.0, mix = 0.0;
         bool smInit = false;
         int keyType = -1, keySlope = -1;
@@ -98,11 +103,14 @@ private:
         void reset()
         {
             for (auto& ch : f) for (auto& s : ch) s.reset();
-            det.reset(); env = 0.0; env2 = 0.0; envDb = -120.0; appliedDyn = 0.0; keyType = -1; keyDF = 0; smInit = false;
+            for (auto& ch : fd) for (auto& s : ch) s.reset();
+            det.reset(); relDet.reset(); renv = renv2 = fastE = slowE = 0.0; keyRF = 0.0; env = 0.0; env2 = 0.0; envDb = -120.0; appliedDyn = 0.0; keyType = -1; keyDF = 0; smInit = false;
         }
     };
 
-    static constexpr int irLen = 8192;
+    int wantedIrLen() const;
+    int wantedSpecOrder() const;   // FFT size (log2) of the Spectral Dynamic stage: depends on the processing mode   // FIR length of the Linear / Mixed Phase modes (latency = half of it)
+    juce::dsp::FFT& irFFTFor (int n) { return n <= 2048 ? irFFT11 : (n <= 4096 ? irFFT12 : irFFT13); }
 
     BandVals readBand (int b) const;
     void ensureDesign (BandState&, const BandVals&, double fs);
@@ -120,9 +128,10 @@ private:
     std::vector<float> scUp[2];       // sidechain upsampled for Natural Phase mode
     float scPrev[2] { 0.0f, 0.0f };
     juce::dsp::Convolution conv { juce::dsp::Convolution::Latency { 0 } };
-    juce::dsp::FFT irFFT { 13 };
+    juce::dsp::FFT irFFT11 { 11 }, irFFT12 { 12 }, irFFT13 { 13 };
 
-    std::atomic<bool> irDirty { true }, linearActive { false }, spectralActive { false };
+    std::atomic<bool> irDirty { true }, linearActive { false }, mixedActive { false }, spectralActive { false };
+    bool cur117 = false, lastP117 = false;   // 117-bit (double-double) filter state
     std::atomic<int> osStage { 0 };   // 0 = off, 1..3 = 2x..8x
     bool lastLinear = false, lastSpectral = false;
     int lastStage = 0;

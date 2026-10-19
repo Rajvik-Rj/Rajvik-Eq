@@ -7,10 +7,11 @@
 class SpectralStage
 {
 public:
-    static constexpr int order = 11;
-    static constexpr int N = 1 << order;   // 2048, also the latency in samples
-    static constexpr int hop = N / 4;
-    static constexpr int bins = N / 2 + 1;
+    // FFT size follows the processing mode (latency = FFT size in samples): small and fast in Zero Latency mode,
+    // larger (better frequency resolution, "sound first") in the Natural / Linear / Mixed modes.
+    static constexpr int maxOrder = 11;
+    static constexpr int maxN = 1 << maxOrder;
+    static constexpr int maxBins = maxN / 2 + 1;
 
     struct BandCfg
     {
@@ -19,13 +20,25 @@ public:
         float freq = 1000.f, q = 1.f, thr = -24.f, range = -6.f, att = 20.f, rel = 150.f;
     };
 
-    SpectralStage() : fft (order)
+    SpectralStage() : fft9 (9), fft10 (10), fft11 (11)
     {
-        for (int i = 0; i < N; ++i)
-            win[(size_t) i] = std::sin (juce::MathConstants<float>::pi * ((float) i + 0.5f) / (float) N);
+        applyOrder (10);
         for (auto& c : cachedFreq) c = -1.0f;
         reset();
     }
+
+    // switches the FFT size (9 = 512, 10 = 1024, 11 = 2048 samples of latency); clears the stage
+    void setOrder (int o)
+    {
+        o = juce::jlimit (9, maxOrder, o);
+        if (o == order) return;
+        applyOrder (o);
+        for (auto& c : cachedFreq) c = -1.0f;
+        reset();
+    }
+    int latency() const { return orderA.load() >= 0 ? (1 << orderA.load()) : 1024; }   // samples
+    int binsNow() const { return (1 << orderA.load()) / 2 + 1; }
+    int sizeNow() const { return 1 << orderA.load(); }
 
     void prepare (double sr)
     {
@@ -128,7 +141,7 @@ public:
         }
     }
 
-    std::array<float, bins> mask {};            // live per-bin gain (dB) the stage applies, for the display
+    std::array<float, maxBins> mask {};            // live per-bin gain (dB) the stage applies, for the display
     std::array<float, RP::numBands> dynAt {};   // current dynamic offset (dB) at each band's centre bin
     std::array<float, RP::numBands> lvlAt {};   // live detector level (dB) of each band: the same quantity the Dynamic EQ detector reads
 
@@ -140,7 +153,7 @@ private:
         return p + (sc ? 4 : 0);
     }
 
-    void spectraOf (const std::array<std::array<float, 2 * N>, 2>& f, int base)
+    void spectraOf (const std::array<std::array<float, 2 * maxN>, 2>& f, int base)
     {
         const float norm = 1.0f / ((float) N * 0.3183f);   // 0 dBFS sine -> 0 dB
         const float n2 = norm * norm;
@@ -164,8 +177,8 @@ private:
             auto& f = fr[(size_t) ch];
             for (int i = 0; i < N; ++i)
                 f[(size_t) i] = inBuf[(size_t) ch][(size_t) ((pos + i) & (N - 1))] * win[(size_t) i];
-            std::fill (f.begin() + N, f.end(), 0.0f);
-            fft.performRealOnlyForwardTransform (f.data(), true);
+            std::fill (f.begin() + N, f.begin() + 2 * N, 0.0f);
+            fftp->performRealOnlyForwardTransform (f.data(), true);
         }
         spectraOf (fr, 0);
 
@@ -178,8 +191,8 @@ private:
                 auto& f = frSc[(size_t) ch];
                 for (int i = 0; i < N; ++i)
                     f[(size_t) i] = inSc[(size_t) ch][(size_t) ((pos + i) & (N - 1))] * win[(size_t) i];
-                std::fill (f.begin() + N, f.end(), 0.0f);
-                fft.performRealOnlyForwardTransform (f.data(), true);
+                std::fill (f.begin() + N, f.begin() + 2 * N, 0.0f);
+                fftp->performRealOnlyForwardTransform (f.data(), true);
             }
             spectraOf (frSc, 4);
         }
@@ -279,7 +292,7 @@ private:
         for (int ch = 0; ch < 2; ++ch)
         {
             auto& f = fr[(size_t) ch];
-            fft.performRealOnlyInverseTransform (f.data());
+            fftp->performRealOnlyInverseTransform (f.data());
             for (int i = 0; i < N; ++i)
                 outBuf[(size_t) ch][(size_t) ((pos + i) & (N - 1))] += f[(size_t) i] * win[(size_t) i] * 0.5f;
         }
@@ -293,16 +306,27 @@ private:
         return x * x * (3.0f - 2.0f * x);
     }
 
-    juce::dsp::FFT fft;
+    void applyOrder (int o)
+    {
+        order = o; N = 1 << o; hop = N / 4; bins = N / 2 + 1;
+        fftp = o == 9 ? &fft9 : (o == 10 ? &fft10 : &fft11);
+        for (int i = 0; i < N; ++i)
+            win[(size_t) i] = std::sin (juce::MathConstants<float>::pi * ((float) i + 0.5f) / (float) N);
+        orderA.store (o);
+    }
+    juce::dsp::FFT fft9, fft10, fft11;
+    juce::dsp::FFT* fftp = nullptr;
+    std::atomic<int> orderA { 10 };
+    int order = 10, N = 1024, hop = 256, bins = 513;
     double fs = 44100.0;
     int pos = 0, hopCount = 0;
-    std::array<float, N> win {};
-    std::array<std::array<float, N>, 2> inBuf {}, inSc {}, outBuf {};
-    std::array<std::array<float, 2 * N>, 2> fr {}, frSc {};
-    std::array<std::array<float, bins>, 8> pw {}, dbv {};
+    std::array<float, maxN> win {};
+    std::array<std::array<float, maxN>, 2> inBuf {}, inSc {}, outBuf {};
+    std::array<std::array<float, 2 * maxN>, 2> fr {}, frSc {};
+    std::array<std::array<float, maxBins>, 8> pw {}, dbv {};
     std::array<bool, 8> dbDone {};
-    std::array<std::array<float, bins>, 5> gain {};
-    std::array<std::array<float, bins>, RP::numBands> env {}, weight {}, detW {};
+    std::array<std::array<float, maxBins>, 5> gain {};
+    std::array<std::array<float, maxBins>, RP::numBands> env {}, weight {}, detW {};
     std::array<int, RP::numBands> lo_ {}, hi_ {}, dLo {}, dHi {};
     std::array<float, RP::numBands> detGain {};
     std::array<float, RP::numBands> cachedFreq {}, cachedQ {};

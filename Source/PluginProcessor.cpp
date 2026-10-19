@@ -54,7 +54,8 @@ RajvikEQAudioProcessor::RajvikEQAudioProcessor()
     {
         auto g = [this, b] (const char* n) { return apvts.getRawParameterValue (pid (b, n)); };
         ptrs[(size_t) b] = { g ("en"), g ("type"), g ("freq"), g ("gain"), g ("q"), g ("slope"), g ("place"),
-                             g ("dyn"), g ("spec"), g ("thr"), g ("range"), g ("att"), g ("rel"), g ("dir"), g ("sc") };
+                             g ("dyn"), g ("spec"), g ("thr"), g ("range"), g ("att"), g ("rel"), g ("dir"), g ("sc"),
+                             g ("relamt"), g ("relmode"), g ("relf"), g ("relq"), g ("onset") };
     }
     for (auto* p : getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
@@ -117,7 +118,23 @@ RajvikEQAudioProcessor::BandVals RajvikEQAudioProcessor::readBand (int b) const
     v.type = (int) p.type->load(); v.slope = (int) p.slope->load(); v.place = (int) p.place->load(); v.dir = (int) p.dir->load();
     v.freq = p.freq->load(); v.gain = p.gain->load(); v.q = p.q->load(); v.thr = p.thr->load();
     v.range = p.range->load(); v.att = p.att->load(); v.rel = p.rel->load();
+    v.relamt = p.relamt->load(); v.relmode = (int) p.relmode->load(); v.relf = p.relf->load(); v.relq = p.relq->load(); v.onset = p.onset->load();
     return v;
+}
+
+int RajvikEQAudioProcessor::wantedIrLen() const
+{
+    const int mode = (int) apvts.getRawParameterValue ("mode")->load();
+    if (mode == 3) return 2048;   // Mixed Phase: the low end stays minimum phase, so a short FIR is enough for the highs
+    return RP::linLenValues[juce::jlimit (0, 2, (int) apvts.getRawParameterValue ("lin_len")->load())];
+}
+
+int RajvikEQAudioProcessor::wantedSpecOrder() const
+{
+    // Zero Latency: 512 samples (about 11 ms), Natural / Mixed: 1024, Linear: 2048 (best resolution, latency is high there anyway)
+    const int mode = (int) apvts.getRawParameterValue ("mode")->load();
+    const int base = mode == 0 ? 9 : (mode == 2 ? 11 : 10);
+    return juce::jlimit (9, 11, base + (getSampleRate() > 70000.0 ? 1 : 0));   // keep the time length similar at 88.2 / 96 kHz
 }
 
 void RajvikEQAudioProcessor::updateFlags()
@@ -125,7 +142,8 @@ void RajvikEQAudioProcessor::updateFlags()
     // Linear / Natural / Spectral need a plain stereo layout; surround and mono run in zero latency mode.
     const bool two = getMainBusNumInputChannels() == 2;
     const int mode = (int) apvts.getRawParameterValue ("mode")->load();
-    const bool lin = two && mode == 2, nat = two && mode == 1;
+    const bool lin = two && (mode == 2 || mode == 3), nat = two && mode == 1;
+    mixedActive = two && mode == 3;
     // oversampling: Zero Latency / Natural Phase run the bands at 2x / 4x / 8x (Natural Phase is always at least 2x)
     const int osParam = (int) apvts.getRawParameterValue ("os")->load();
     const int stage = (two && ! lin) ? juce::jmax (osParam, nat ? 1 : 0) : 0;
@@ -140,7 +158,7 @@ void RajvikEQAudioProcessor::updateFlags()
     osStage = stage;
     spectralActive = sp;
     const int osLat = (stage > 0 && os[(size_t) (stage - 1)] != nullptr) ? (int) std::lround (os[(size_t) (stage - 1)]->getLatencyInSamples()) : 0;
-    const int lat = (lin ? irLen / 2 : 0) + osLat + (sp ? SpectralStage::N : 0);
+    const int lat = (lin ? wantedIrLen() / 2 : 0) + osLat + (sp ? (1 << wantedSpecOrder()) : 0);
     if (lat != getLatencySamples()) setLatencySamples (lat);
 }
 
@@ -156,7 +174,7 @@ void RajvikEQAudioProcessor::rebuildIR()
 {
     const double fs = getSampleRate();
     if (fs <= 0.0) return;
-    constexpr int N = irLen, half = N / 2;
+    const int N = wantedIrLen(), half = N / 2;
     juce::AudioBuffer<float> ir (2, N);
     ir.clear();
     std::vector<float> data ((size_t) (2 * N));
@@ -173,6 +191,16 @@ void RajvikEQAudioProcessor::rebuildIR()
             if (modeOf (v) == ModeDynamic || v.place == Mid || v.place == Side) continue;   // handled by the hybrid path
             const bool affects = v.place == Stereo || (ch == 0 && v.place == Left) || (ch == 1 && v.place == Right);
             if (! affects) continue;
+            // Mixed Phase: the low part of the band stays minimum phase (runs as a biquad, zero latency), the FIR only carries what is left,
+            // so the sum is exactly the full band. Low frequency bands are almost all minimum phase, high frequency bands almost all linear.
+            BandDesign dmin;
+            bool hasMin = false;
+            if (mixedActive.load())
+            {
+                const double wl = mixedLinearWeight (v.freq);
+                if (typeHasGain (v.type)) { design (dmin, v.type, v.freq, (double) v.gain * (1.0 - wl), v.q, v.slope, fs); hasMin = true; }
+                else if (wl < 0.5) continue;   // a pure minimum phase band (cut / notch / band pass at low frequency): not part of the FIR
+            }
             BandDesign d;
             design (d, v.type, v.freq, v.gain, v.q, v.slope, fs * 2.0);   // designed at 2x: the linear phase FIR has no cramping towards Nyquist
             for (int k = 0; k <= half; ++k)
@@ -180,13 +208,20 @@ void RajvikEQAudioProcessor::rebuildIR()
                 const double w = detail::twoPi * 0.5 * (double) k / (double) N;
                 double m = 1.0;
                 for (int s = 0; s < d.n; ++s) m *= magSq (d.sec[s], w);
+                if (hasMin)
+                {
+                    const double wm = detail::twoPi * (double) k / (double) N;   // the minimum phase part runs at the host rate
+                    double mm = 1.0;
+                    for (int s = 0; s < dmin.n; ++s) mm *= magSq (dmin.sec[s], wm);
+                    m /= juce::jmax (mm, 1.0e-30);
+                }
                 mag[(size_t) k] *= std::sqrt (m);
             }
         }
         std::fill (data.begin(), data.end(), 0.0f);
         for (int k = 0; k <= half; ++k) data[(size_t) (2 * k)] = (float) mag[(size_t) k];
         for (int k = 1; k < half; ++k)  data[(size_t) (2 * (N - k))] = (float) mag[(size_t) k];
-        irFFT.performRealOnlyInverseTransform (data.data());
+        irFFTFor (N).performRealOnlyInverseTransform (data.data());
         for (int n = 0; n < N; ++n)
         {
             const int idx = (n + half) % N;
@@ -206,7 +241,10 @@ void RajvikEQAudioProcessor::ensureDesign (BandState& s, const BandVals& v, doub
         design (s.design, v.type, v.freq, g, v.q, v.slope, fs);
         for (int ch = 0; ch < 16; ++ch)
             for (int k = 0; k < s.design.n; ++k)
+            {
                 s.f[ch][k].c = s.design.sec[k];
+                s.fd[ch][k].c = s.design.sec[k];
+            }
         s.keyType = v.type; s.keySlope = v.slope; s.keyFreq = v.freq; s.keyQ = v.q; s.keyGain = g; s.keyFs = fs;
     }
 }
@@ -231,13 +269,31 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
         const int kind = modeOf (v);
         const bool dynamic = kind == ModeDynamic || (kind == ModeSpectral && nCh != 2);
         const bool hybrid = dynamic || v.place == Mid || v.place == Side;
-        const bool active = v.en && ! (kind == ModeSpectral && nCh == 2) && ! (linear && ! hybrid);   // stereo Spectral bands live in the STFT stage only
+        // Mixed Phase: static bands keep their minimum phase share here (the FIR carries the rest)
+        const bool mixedStatic = mixedActive.load() && linear && ! hybrid;
+        const double wLin = mixedStatic ? mixedLinearWeight (v.freq) : 0.0;
+        if (mixedStatic && typeHasGain (v.type)) v.gain = (float) ((double) v.gain * (1.0 - wLin));
+        const bool minPart = mixedStatic && (typeHasGain (v.type) ? wLin < 0.9999 : wLin < 0.5);
+        // a gain band with 0 dB gain is a flat filter: it costs no CPU at all (the on / off crossfade makes the switch click free)
+        const bool flat = ! dynamic && typeHasGain (v.type) && std::abs (v.gain) < 0.005f;
+        const bool active = v.en && ! flat && ! (kind == ModeSpectral && nCh == 2) && ! (linear && ! hybrid && ! minPart);   // stereo Spectral bands live in the STFT stage only
         if (! active && s.mix <= 0.0) { s.wasOn = false; continue; }
         if (! s.wasOn) { s.reset(); s.mix = 0.0; s.wasOn = true; }
 
         if (! dynamic) s.appliedDyn = 0.0;
 
-        auto casc = [&s] (int ch, double x) { for (int k = 0; k < s.design.n; ++k) x = s.f[ch][k].process (x); return x; };
+        const bool p117 = cur117;
+        auto casc = [&s, p117] (int ch, double x) -> double
+        {
+            if (p117)
+            {
+                DD y { x, 0.0 };
+                for (int k = 0; k < s.design.n; ++k) y = s.fd[ch][k].process (y);
+                return y.hi + y.lo;
+            }
+            for (int k = 0; k < s.design.n; ++k) x = s.f[ch][k].process (x);
+            return x;
+        };
 
         for (int start = 0; start < n; start += sub)
         {
@@ -274,6 +330,17 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
                 // quantity from its FFT, so one threshold value means the same thing in Dynamic and in Spectral mode.
                 const double tau = juce::jlimit (0.0003, 0.03, 0.45 / juce::jmax (20.0, (double) v.freq));
                 const double cs = 1.0 - std::exp (-1.0 / (tau * fs));
+                // relative detection: how loud is this band compared with a reference (the whole signal, or another band)
+                // onset detection: reacts to the rise of the band level (fast vs slow envelope)
+                const bool useRel = v.relamt > 0.05f, useOn = v.onset > 0.05f;
+                const double csr = 1.0 - std::exp (-1.0 / (0.01 * fs)), cfast = 1.0 - std::exp (-1.0 / (0.004 * fs)), cslow = 1.0 - std::exp (-1.0 / (0.06 * fs));
+                if (useRel && v.relmode == 1 && (s.keyRF != v.relf || s.keyRQ != v.relq || s.keyRFs != fs))
+                {
+                    s.relDet.c = detail::bandpass (juce::jlimit (5.0, fs * 0.49, (double) v.relf), juce::jmax (0.1, (double) v.relq), fs);
+                    s.keyRF = v.relf; s.keyRQ = v.relq; s.keyRFs = fs;
+                }
+                if (! useRel) { s.renv = 0.0; s.renv2 = 0.0; }
+                if (! useOn)  { s.fastE = 0.0; s.slowE = 0.0; }
                 for (int i = 0; i < len; ++i)
                 {
                     // detector input: the main signal, or the sidechain input when this band uses it (silence if none is connected)
@@ -291,8 +358,32 @@ void RajvikEQAudioProcessor::runBands (float* const* chs, int nCh, int n, bool l
                     const double y = s.det.process (in);
                     s.env  += cs * (y * y - s.env);
                     s.env2 += cs * (s.env - s.env2);
+                    if (useRel)
+                    {
+                        const double ry = v.relmode == 1 ? s.relDet.process (in) : in;
+                        s.renv  += csr * (ry * ry - s.renv);
+                        s.renv2 += csr * (s.renv - s.renv2);
+                    }
+                    if (useOn)
+                    {
+                        s.fastE += cfast * (y * y - s.fastE);
+                        s.slowE += cslow * (y * y - s.slowE);
+                    }
                 }
-                const double lvlInst = 10.0 * std::log10 (2.0 * s.env2 + 1.0e-12);   // sine of amplitude A: mean square A^2/2 -> A^2 -> 20 log A
+                double lvlInst = 10.0 * std::log10 (2.0 * s.env2 + 1.0e-12);   // sine of amplitude A: mean square A^2/2 -> A^2 -> 20 log A
+                if (useOn)
+                {
+                    const double Lf = 10.0 * std::log10 (2.0 * s.fastE + 1.0e-12), Ls = 10.0 * std::log10 (2.0 * s.slowE + 1.0e-12);
+                    const double Lon = Ls + 2.0 * juce::jmax (0.0, Lf - Ls);   // emphasises the rising edge of the band level
+                    const double m = (double) v.onset * 0.01;
+                    lvlInst = (1.0 - m) * lvlInst + m * Lon;
+                }
+                if (useRel)
+                {
+                    const double Lr = 10.0 * std::log10 (2.0 * s.renv2 + 1.0e-12);
+                    const double a = (double) v.relamt * 0.01 * juce::jlimit (0.0, 1.0, (Lr + 100.0) / 20.0);   // fades out on silence
+                    lvlInst -= a * Lr;   // 100 %: the level is the band's share of the reference level (in dB)
+                }
                 // attack / release act on the level in dB (one step per sub-block of len samples)
                 const double ca = 1.0 - std::exp (-(double) len / (0.001 * juce::jmax (0.1f, v.att) * fs));
                 const double cr = 1.0 - std::exp (-(double) len / (0.001 * juce::jmax (1.0f, v.rel) * fs));
@@ -420,8 +511,11 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const bool linear = linearActive.load() && nCh == 2;
     const int stage = nCh == 2 ? osStage.load() : 0;
     const bool spectral = spectralActive.load() && nCh == 2;
+    cur117 = apvts.getRawParameterValue ("prec")->load() > 0.5f;
+    if (cur117 != lastP117)       { for (auto& b : bands) b.reset(); lastP117 = cur117; }
     if (linear != lastLinear)     { conv.reset(); for (auto& b : bands) b.reset(); lastLinear = linear; }
     if (stage != lastStage)       { for (auto& o : os) if (o != nullptr) o->reset(); for (auto& b : bands) b.reset(); lastStage = stage; }
+    spec.setOrder (wantedSpecOrder());
     if (spectral != lastSpectral) { spec.reset(); lastSpectral = spectral; }
 
     const double fs = getSampleRate();
@@ -522,7 +616,18 @@ void RajvikEQAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     else outGain.skip (n);
 
     float pkL = 0.0f, pkR = 0.0f;
+    bool bad = false;
     for (int i = 0; i < n; ++i) { pkL = juce::jmax (pkL, std::abs (L[i])); pkR = juce::jmax (pkR, std::abs (R[i])); }
+    if (! (pkL < 1.0e6f) || ! (pkR < 1.0e6f))   // NaN / inf / runaway: silence this block and restart the filters (never blast the output)
+    {
+        bad = true;
+        for (int ch = 0; ch < nCh; ++ch) juce::FloatVectorOperations::clear (chs[ch], n);
+        for (auto& b : bands) b.reset();
+        spec.reset();
+        conv.reset();
+        pkL = pkR = 0.0f;
+    }
+    juce::ignoreUnused (bad);
     if (pkL > peakL.load()) peakL.store (pkL);
     if (pkR > peakR.load()) peakR.store (pkR);
 

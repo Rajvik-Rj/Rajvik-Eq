@@ -93,6 +93,9 @@ public:
         setColour (juce::ResizableWindow::backgroundColourId, Look::bgBot);
         setColour (juce::Label::textColourId, Look::muted);
         setColour (juce::Slider::rotarySliderFillColourId, Look::gold);
+        setColour (juce::BubbleComponent::backgroundColourId, juce::Colour (0xf2101018));
+        setColour (juce::BubbleComponent::outlineColourId, Look::gold.withAlpha (0.75f));
+        setColour (juce::TooltipWindow::textColourId, juce::Colours::white);
         setColour (juce::Slider::textBoxTextColourId, Look::text);
         setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
         setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
@@ -192,17 +195,22 @@ public:
         g.drawText (b.getButtonText(), (int) dot.getRight() + 8, 0, b.getWidth() - 22, b.getHeight(), juce::Justification::centredLeft);
     }
 
-    // knob value boxes of the band strip: bold, left aligned, placed to the right of the knob
+    // knob value boxes of the band strip: bold; "valueLeft" = left aligned beside the knob, otherwise centred under it
     juce::Label* createSliderTextBox (juce::Slider& sl) override
     {
         auto* l = LookAndFeel_V4::createSliderTextBox (sl);
-        if ((bool) sl.getProperties().getWithDefault ("valueLeft", false))
+        if (sl.getProperties().contains ("valueSize"))
         {
-            l->setJustificationType (juce::Justification::centredLeft);
-            l->setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
+            const float sz = (float) (double) sl.getProperties().getWithDefault ("valueSize", 15.0);
+            l->setFont (juce::Font (juce::FontOptions (sz, juce::Font::bold)));
+            l->setJustificationType ((bool) sl.getProperties().getWithDefault ("valueLeft", false) ? juce::Justification::centredLeft
+                                                                                                 : juce::Justification::centred);
         }
         return l;
     }
+
+    // the value bubble that pops up above a knob while you hover / drag it: big and readable
+    juce::Font getSliderPopupFont (juce::Slider&) override { return juce::Font (juce::FontOptions (22.0f, juce::Font::bold)); }
 
     void drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1, juce::Slider& s) override
     {

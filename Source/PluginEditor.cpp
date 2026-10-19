@@ -18,7 +18,7 @@ EQDisplay::EQDisplay (RajvikEQAudioProcessor& p) : proc (p)
     toolWin.resize (4096);
     for (int i = 0; i < 4096; ++i) toolWin[(size_t) i] = 1.0f - std::cos (juce::MathConstants<float>::twoPi * (float) i / 4095.0f);
     configureAnalyzer();
-    startTimerHz (60);
+    startTimerHz (30);   // 30 fps while idle, 60 fps while you interact (see mouseDown / mouseUp)
 }
 
 float EQDisplay::dispRange() const
@@ -35,8 +35,66 @@ float EQDisplay::anaTilt() const
     static const float t[] = { 0.0f, 1.5f, 3.0f, 4.5f, 6.0f };
     return t[juce::jlimit (0, 4, (int) apvtsVal ("ana_tilt"))];
 }
-float EQDisplay::freqToX (float f) const { return (float) getWidth() * std::log (juce::jmax (f, 10.0f) / 10.0f) / std::log (2000.0f); }
-float EQDisplay::xToFreq (float x) const { return 10.0f * std::pow (2000.0f, x / (float) getWidth()); }
+float EQDisplay::freqToX (float f) const { return (float) getWidth() * std::log (juce::jmax (f, 1.0f) / viewLo) / std::log (viewHi / viewLo); }
+float EQDisplay::xToFreq (float x) const { return viewLo * std::pow (viewHi / viewLo, x / (float) juce::jmax (1, getWidth())); }
+
+void EQDisplay::setView (float lo, float hi)
+{
+    const float full = std::log (2000.0f);
+    const float span = juce::jlimit (std::log (1.25f), full, std::log (juce::jmax (hi, lo * 1.01f) / lo));
+    const float cl = juce::jlimit (0.0f, full - span, std::log (lo / 10.0f));
+    viewLo = 10.0f * std::exp (cl);
+    viewHi = 10.0f * std::exp (cl + span);
+    repaint();
+}
+
+void EQDisplay::zoomAt (float x, float k)
+{
+    const float t = juce::jlimit (0.0f, 1.0f, x / (float) juce::jmax (1, getWidth()));
+    const float lo = std::log (viewLo), hi = std::log (viewHi), anchor = lo + (hi - lo) * t, span = (hi - lo) * k;
+    setView (std::exp (anchor - span * t), std::exp (anchor + span * (1.0f - t)));
+}
+
+void EQDisplay::panBy (float dxPixels)
+{
+    const float lo = std::log (viewLo), hi = std::log (viewHi), shift = (hi - lo) * dxPixels / (float) juce::jmax (1, getWidth());
+    setView (std::exp (lo + shift), std::exp (hi + shift));
+}
+
+juce::Rectangle<float> EQDisplay::zoomBtn (int i) const
+{
+    return i == 0 ? juce::Rectangle<float> (8.0f, 8.0f, 24.0f, 20.0f)
+         : i == 1 ? juce::Rectangle<float> (36.0f, 8.0f, 24.0f, 20.0f)
+                  : juce::Rectangle<float> (64.0f, 8.0f, 36.0f, 20.0f);
+}
+
+// zoom buttons, the visible range and a scroll indicator, drawn above everything else
+void EQDisplay::paintOverChildren (juce::Graphics& g)
+{
+    g.setFont (juce::Font (juce::FontOptions (13.0f, juce::Font::bold)));
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto r = zoomBtn (i);
+        const bool lit = i == 2 && isZoomed();
+        g.setColour (lit ? Look::gold.withAlpha (0.28f) : juce::Colours::black.withAlpha (0.38f));
+        g.fillRoundedRectangle (r, 5.0f);
+        g.setColour (lit ? Look::gold : juce::Colours::white.withAlpha (0.78f));
+        g.drawText (i == 0 ? "-" : (i == 1 ? "+" : "Fit"), r.toNearestInt(), juce::Justification::centred);
+    }
+    if (isZoomed())
+    {
+        auto fmt = [] (float f) { return f >= 1000.0f ? juce::String (f / 1000.0f, f >= 10000.0f ? 1 : 2) + " kHz" : juce::String ((int) std::lround (f)) + " Hz"; };
+        g.setFont (juce::Font (juce::FontOptions (12.0f)));
+        g.setColour (Look::gold.withAlpha (0.9f));
+        g.drawText (fmt (viewLo) + " - " + fmt (viewHi), 108, 8, 200, 20, juce::Justification::centredLeft);
+        const float full = std::log (2000.0f), w = (float) getWidth(), y = (float) getHeight() - 3.0f;
+        g.setColour (juce::Colours::white.withAlpha (0.10f));
+        g.fillRect (0.0f, y, w, 3.0f);
+        g.setColour (Look::gold.withAlpha (0.85f));
+        const float a = w * std::log (viewLo / 10.0f) / full, b = w * std::log (viewHi / 10.0f) / full;
+        g.fillRect (a, y, juce::jmax (4.0f, b - a), 3.0f);
+    }
+}
 float EQDisplay::gainToY (float g) const { return (float) getHeight() * 0.5f * (1.0f - g / dispRange()); }
 float EQDisplay::yToGain (float y) const { return (1.0f - 2.0f * y / (float) getHeight()) * dispRange(); }
 
@@ -148,9 +206,10 @@ void EQDisplay::toolSpectrum()
 
 void EQDisplay::timerCallback()
 {
+    if (! isShowing()) return;   // hidden / minimised editor: no analysis, no drawing
     configureAnalyzer();   // the resolution setting may have changed
     const double now = juce::Time::getMillisecondCounterHiRes();
-    const float dt = lastTick > 0.0 ? juce::jlimit (0.004f, 0.1f, (float) ((now - lastTick) * 0.001)) : (1.0f / 60.0f);   // real frame time: smoothing is frame-rate independent
+    const float dt = lastTick > 0.0 ? juce::jlimit (0.004f, 0.1f, (float) ((now - lastTick) * 0.001)) : (1.0f / 30.0f);   // real frame time: smoothing is frame-rate independent
     lastTick = now;
     const bool ana = apvtsVal ("analyzer") > 0.5f && apvtsVal ("ana_freeze") < 0.5f;
     const int view = (int) apvtsVal ("ana_view");   // 0 pre, 1 post, 2 both
@@ -314,16 +373,29 @@ void EQDisplay::paintGrid (juce::Graphics& g)
 
     // grid
     g.setFont (juce::Font (juce::FontOptions (11.5f)));
-    const float freqs[] = { 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000 };
-    for (float f : freqs)
-    {
-        const float x = freqToX (f);
-        const bool major = (f == 100.0f || f == 1000.0f || f == 10000.0f);
-        g.setColour (juce::Colours::white.withAlpha (major ? 0.085f : 0.045f));
-        g.drawVerticalLine ((int) x, 0.0f, h);
-        g.setColour (juce::Colours::white.withAlpha (0.38f));
-        g.drawText (f >= 1000 ? juce::String (f / 1000) + "k" : juce::String ((int) f), juce::jmin ((int) x - 20, (int) w - 40), (int) h - 18, 40, 14, juce::Justification::centred);
-    }
+    // vertical frequency lines: decades and their multiples; when zoomed in more lines and labels appear
+    const float ppo = w / std::log2 (viewHi / viewLo);   // pixels per octave
+    for (float dec = 1.0f; dec <= 10000.0f; dec *= 10.0f)
+        for (int m = 1; m <= 18; ++m)
+        {
+            const bool half = m > 9;                       // 1.5, 2.5 ... 9.5: only when zoomed in
+            if (half && ppo < 260.0f) break;
+            const float mm = half ? (float) (m - 9) + 0.5f : (float) m;
+            const float f = dec * mm;
+            if (f < 10.0f || f > 20000.0f || f < viewLo * 0.98f || f > viewHi * 1.02f) continue;
+            const float x = freqToX (f);
+            const bool major = m == 1 && (dec == 100.0f || dec == 1000.0f || dec == 10000.0f);
+            g.setColour (juce::Colours::white.withAlpha (major ? 0.085f : (half ? 0.028f : 0.045f)));
+            g.drawVerticalLine ((int) x, 0.0f, h);
+            const float dist = half ? ppo * std::log2 (1.0f + 0.5f / (mm - 0.5f)) : (m == 1 ? 1000.0f : ppo * std::log2 (mm / (mm - 1.0f)));
+            const float need = half ? 44.0f : (m == 1 ? 0.0f : ((m == 2 || m == 5) ? 24.0f : (m == 3 ? 60.0f : 40.0f)));
+            if (dist < need) continue;
+            const bool whole = std::abs (f - std::round (f)) < 0.01f;
+            const juce::String t = f >= 1000.0f ? juce::String (f / 1000.0f, (std::abs (f / 1000.0f - std::round (f / 1000.0f)) < 0.001f) ? 0 : 1) + "k"
+                                                : (whole ? juce::String ((int) std::lround (f)) : juce::String (f, 1));
+            g.setColour (juce::Colours::white.withAlpha (0.38f));
+            g.drawText (t, juce::jlimit (0, (int) w - 40, (int) x - 20), (int) h - 18, 40, 14, juce::Justification::centred);
+        }
     const float range = dispRange();
     const float step = RP::rangeStep (range);
     for (float gdb = -range; gdb <= range + 0.01f; gdb += step)
@@ -422,7 +494,7 @@ void EQDisplay::paintCurves (juce::Graphics& g)
 
 std::vector<float> EQDisplay::gridKeyNow (float scale) const
 {
-    return { (float) getWidth(), (float) getHeight(), dispRange(), anaRange(), apvtsVal ("analyzer"), scale };
+    return { (float) getWidth(), (float) getHeight(), dispRange(), anaRange(), apvtsVal ("analyzer"), scale, viewLo, viewHi };
 }
 
 std::vector<float> EQDisplay::curveKeyNow (float scale) const
@@ -431,7 +503,7 @@ std::vector<float> EQDisplay::curveKeyNow (float scale) const
     k.reserve (numBands * 10 + 12);
     const auto argb = Look::gold.getARGB();
     for (float v : { (float) getWidth(), (float) getHeight(), dispRange(), (float) selected, (float) proc.responseRateFactor(),
-                     (float) proc.getSampleRate(), scale, (float) (argb >> 16), (float) (argb & 0xffff) })
+                     (float) proc.getSampleRate(), scale, (float) (argb >> 16), (float) (argb & 0xffff), viewLo, viewHi })
         k.push_back (v);
     for (int b = 0; b < numBands; ++b)
     {
@@ -489,7 +561,7 @@ void EQDisplay::paint (juce::Graphics& g)
                     const float zy = gainToY (0.0f);
                     for (int x = 0; x < getWidth(); x += 2)
                     {
-                        const float pos = juce::jlimit (0.0f, (float) SpectralStage::bins - 2.0f, xToFreq ((float) x) * (float) SpectralStage::N / (float) sfs);
+                        const float pos = juce::jlimit (0.0f, (float) proc.spectralStage().binsNow() - 2.0f, xToFreq ((float) x) * (float) proc.spectralStage().sizeNow() / (float) sfs);
                         const int k = (int) pos;
                         const float fr = pos - (float) k;
                         const float db = mk[(size_t) k] * (1.0f - fr) + mk[(size_t) k + 1] * fr;
@@ -730,7 +802,15 @@ void EQDisplay::paint (juce::Graphics& g)
 
 void EQDisplay::mouseDown (const juce::MouseEvent& e)
 {
+    startTimerHz (60);
     grabKeyboardFocus();
+    for (int i = 0; i < 3; ++i)   // zoom buttons
+        if (zoomBtn (i).contains (e.position))
+        {
+            if (i == 2) resetZoom(); else zoomAt ((float) getWidth() * 0.5f, i == 0 ? 1.6f : 1.0f / 1.6f);
+            return;
+        }
+    if (inAxisStrip (e.position) && hitTest (e.position) < 0 && ! sketchMode) { axisDrag = true; axisLastX = e.position.x; return; }   // drag the frequency axis to scroll
     if (sketchMode) { sketch.clear(); sketch.push_back (e.position); return; }
     const int h = hitTest (e.position);
     if (h < 0)
@@ -763,6 +843,7 @@ void EQDisplay::mouseDown (const juce::MouseEvent& e)
 void EQDisplay::mouseDrag (const juce::MouseEvent& e)
 {
     hoverX = e.position.x; hoverY = e.position.y;
+    if (axisDrag) { panBy (-(e.position.x - axisLastX)); axisLastX = e.position.x; return; }
     if (sketchMode) { sketch.push_back (e.position); repaint(); return; }
     if (marqueeing) { mqRect = juce::Rectangle<float> (mqStart, e.position); repaint(); return; }
     if (! dragging) return;
@@ -803,6 +884,8 @@ void EQDisplay::finishMarquee (bool additive)
 
 void EQDisplay::mouseUp (const juce::MouseEvent& e)
 {
+    startTimerHz (30);
+    if (axisDrag) { axisDrag = false; return; }
     if (sketchMode) { finishSketch(); return; }
     if (marqueeing) { finishMarquee (e.mods.isShiftDown() || e.mods.isCommandDown() || e.mods.isCtrlDown()); return; }
     if (! dragging) return;
@@ -862,8 +945,10 @@ bool EQDisplay::keyPressed (const juce::KeyPress& k)
 void EQDisplay::mouseDoubleClick (const juce::MouseEvent& e)
 {
     if (sketchMode) return;
+    for (int i = 0; i < 3; ++i) if (zoomBtn (i).contains (e.position)) return;
     const int h = hitTest (e.position);
     if (h >= 0) { setIndex (pid (h, "en"), 0); repaint(); return; }
+    if (inAxisStrip (e.position)) { resetZoom(); return; }   // double click on the frequency axis: full view
 
     const float clickF = juce::jlimit (10.0f, 20000.0f, xToFreq (e.position.x));
     // A double click close to the left edge (about 20 Hz) makes a Low Cut (high pass) at that frequency,
@@ -891,6 +976,17 @@ void EQDisplay::mouseExit (const juce::MouseEvent&) { hoverX = -1.0f; hoverY = -
 
 void EQDisplay::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wd)
 {
+    // zoom: Ctrl / Cmd / Alt + wheel anywhere, or the plain wheel on the frequency axis (bottom strip); scroll: Shift + wheel or a horizontal swipe
+    if (e.mods.isCtrlDown() || e.mods.isCommandDown() || e.mods.isAltDown() || (inAxisStrip (e.position) && hitTest (e.position) < 0))
+    {
+        zoomAt (e.position.x, std::exp (-wd.deltaY * 0.9f));
+        return;
+    }
+    if (e.mods.isShiftDown() || std::abs (wd.deltaX) > std::abs (wd.deltaY))
+    {
+        panBy (-(wd.deltaX != 0.0f ? wd.deltaX : wd.deltaY) * (float) getWidth() * 0.6f);
+        return;
+    }
     int b = hitTest (e.position);
     if (b < 0) b = selected;
     if (apvtsVal (pid (b, "en")) < 0.5f) return;
@@ -912,7 +1008,14 @@ void EQDisplay::showMenu (int b)
     juce::PopupMenu m;
     const int cur = (int) apvtsVal (pid (b, "type"));
     if (multi) { m.addSectionHeader (juce::String ((int) targets.size()) + " bands selected"); }
-    for (int i = 0; i < numTypes; ++i) m.addItem (i + 1, typeNames[i], true, ! multi && i == cur);
+    for (int i = 0; i < VintageFirst; ++i) m.addItem (i + 1, typeNames[i], true, ! multi && i == cur);
+    for (int u = 0; u < numVintageUnits; ++u)
+    {
+        juce::PopupMenu sub;
+        for (int i = 0; i < numVintage; ++i)
+            if (vintageDefs[i].unit == u) sub.addItem (VintageFirst + i + 1, vintageDefs[i].name, true, ! multi && VintageFirst + i == cur);
+        m.addSubMenu (juce::String ("Vintage: ") + vintageUnits[u], sub);
+    }
     m.addSeparator();
     bool allGain = true;
     for (int t : targets) allGain = allGain && typeHasGain ((int) apvtsVal (pid (t, "type")));
@@ -1036,6 +1139,7 @@ void EQDisplay::finishSketch()
 
 void EQDisplay::applyMatch()
 {
+    resetZoom();   // the match works on the whole spectrum
     if (refN == 0 || srcN == 0) return;
     const double fs = proc.getSampleRate() > 0 ? proc.getSampleRate() : 44100.0;
     const int w = getWidth();
@@ -1069,6 +1173,7 @@ void EQDisplay::applyMatch()
 // so they can be cut / moved / deleted together (drag, wheel, arrows, Delete).
 void EQDisplay::finishPeakSearch()
 {
+    resetZoom();   // the peak search works on the whole spectrum
     const int w = getWidth();
     std::array<float, 2049> avg {};
     float top = -200.0f;
@@ -1170,21 +1275,109 @@ void BandPanel::Knob::init (juce::Component& parent, const juce::String& name, b
 {
     s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     s.getProperties().set ("valueLeft", true);
-    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 62, 20);
+    s.getProperties().set ("valueSize", 15.0);
+    s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 74, 22);
+    s.setPopupDisplayEnabled (true, true, nullptr, 1500);   // big value bubble above the knob while hovering / dragging
     if (bipolar) s.getProperties().set ("bipolar", true);
     l.setText (name.toUpperCase(), juce::dontSendNotification);
     l.setJustificationType (juce::Justification::centredLeft);
-    l.setFont (juce::Font (juce::FontOptions (10.5f)));
+    l.setFont (juce::Font (juce::FontOptions (11.0f)));
     l.setInterceptsMouseClicks (false, false);
     parent.addAndMakeVisible (s);
     parent.addAndMakeVisible (l);
 }
 
-void BandPanel::Knob::place (juce::Rectangle<int> r)
+void BandPanel::Knob::place (juce::Rectangle<int> r, bool vert)
 {
-    s.setBounds (r);
-    const int kd = juce::jmin (r.getWidth() - 62, r.getHeight());
-    l.setBounds (r.getX() + kd + 5, r.getCentreY() - 23, 62, 13);   // label sits above the value, to the right of the knob
+    if (vert != vertical)
+    {
+        vertical = vert;
+        s.getProperties().set ("valueLeft", ! vert);
+        s.getProperties().set ("valueSize", vert ? 13.0 : 15.0);
+        s.setTextBoxStyle (vert ? juce::Slider::TextBoxBelow : juce::Slider::TextBoxRight, false, vert ? 64 : 74, vert ? 16 : 22);
+        l.setJustificationType (vert ? juce::Justification::centred : juce::Justification::centredLeft);
+        l.setFont (juce::Font (juce::FontOptions (vert ? 10.5f : 11.0f)));
+    }
+    if (vert)
+    {
+        l.setBounds (r.removeFromTop (13));
+        s.setBounds (r);
+    }
+    else
+    {
+        s.setBounds (r);
+        const int kd = juce::jmin (r.getWidth() - 74, r.getHeight());
+        l.setBounds (r.getX() + kd + 6, r.getCentreY() - 27, 74, 14);   // label sits above the value, to the right of the knob
+    }
+}
+
+namespace
+{
+// Detector options of a Dynamic band: relative detection (band vs reference level) and onset detection
+class DetectorPopup : public juce::Component
+{
+public:
+    DetectorPopup (juce::AudioProcessorValueTreeState& v, int band)
+    {
+        using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
+        using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+        auto setup = [this] (juce::Slider& s, juce::Label& l, const juce::String& name)
+        {
+            s.setSliderStyle (juce::Slider::LinearHorizontal);
+            s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 78, 20);
+            l.setText (name, juce::dontSendNotification);
+            l.setFont (juce::Font (juce::FontOptions (13.0f)));
+            addAndMakeVisible (s);
+            addAndMakeVisible (l);
+        };
+        setup (relAmt, lRel, "Relative");
+        setup (relF, lF, "Rel. freq");
+        setup (relQ, lQ, "Rel. Q");
+        setup (onset, lOn, "Onsets");
+        lSrc.setText ("Reference", juce::dontSendNotification);
+        lSrc.setFont (juce::Font (juce::FontOptions (13.0f)));
+        relMode.addItemList (relModeNames, 1);
+        addAndMakeVisible (relMode);
+        addAndMakeVisible (lSrc);
+        lNote.setText ("Dynamic EQ bands. Relative: the band reacts to its share of the reference level (0 % = normal detection, 100 % = fully relative). "
+                       "Onsets: reacts more to the rising edge of the band level.", juce::dontSendNotification);
+        lNote.setFont (juce::Font (juce::FontOptions (11.5f)));
+        lNote.setJustificationType (juce::Justification::topLeft);
+        addAndMakeVisible (lNote);
+        aRel = std::make_unique<SA> (v, pid (band, "relamt"), relAmt);
+        aMode = std::make_unique<CA> (v, pid (band, "relmode"), relMode);
+        aF = std::make_unique<SA> (v, pid (band, "relf"), relF);
+        aQ = std::make_unique<SA> (v, pid (band, "relq"), relQ);
+        aOn = std::make_unique<SA> (v, pid (band, "onset"), onset);
+        relMode.onChange = [this] { refresh(); };
+        refresh();
+        setSize (360, 214);
+    }
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (12, 10);
+        lNote.setBounds (r.removeFromTop (50));
+        r.removeFromTop (4);
+        auto row = [&r] (juce::Label& l, juce::Component& c) { auto a = r.removeFromTop (28); l.setBounds (a.removeFromLeft (80)); c.setBounds (a); r.removeFromTop (2); };
+        row (lRel, relAmt);
+        row (lSrc, relMode);
+        row (lF, relF);
+        row (lQ, relQ);
+        row (lOn, onset);
+    }
+private:
+    void refresh()
+    {
+        const bool band = relMode.getSelectedItemIndex() == 1;
+        relF.setEnabled (band); relQ.setEnabled (band);
+        lF.setAlpha (band ? 1.0f : 0.4f); lQ.setAlpha (band ? 1.0f : 0.4f);
+    }
+    juce::Slider relAmt, relF, relQ, onset;
+    juce::ComboBox relMode;
+    juce::Label lRel, lSrc, lF, lQ, lOn, lNote;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> aRel, aF, aQ, aOn;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> aMode;
+};
 }
 
 BandPanel::BandPanel (RajvikEQAudioProcessor& p) : proc (p)
@@ -1205,14 +1398,27 @@ BandPanel::BandPanel (RajvikEQAudioProcessor& p) : proc (p)
     numLabel.setFont (juce::Font (juce::FontOptions (14.0f, juce::Font::bold)));
 
     for (auto* c : std::initializer_list<juce::Component*> { &enBtn, &closeBtn, &soloBtn, &prevBtn, &nextBtn, &numLabel,
-                                                             &typeBox, &slopeBox, &placeBox, &dirBox, &dynModeBox, &scBtn })
+                                                             &typeBox, &slopeBox, &placeBox, &dirBox, &dynModeBox, &scBtn, &detectBtn })
         addAndMakeVisible (c);
+    detectBtn.setTooltip ("Detector options: relative detection and onset detection");
+    detectBtn.onClick = [this]
+    {
+        if (band < 0 || band >= numBands) return;
+        juce::CallOutBox::launchAsynchronously (std::make_unique<DetectorPopup> (proc.apvts, band), detectBtn.getScreenBounds(), nullptr);
+    };
     dynModeBox.addItem ("Normal EQ", ModeNormal + 1);
     dynModeBox.addItem ("Dynamic EQ", ModeDynamic + 1);
     dynModeBox.addItem ("Spectral Dyn.", ModeSpectral + 1);
     dynModeBox.setTooltip ("Band mode: Normal EQ / Dynamic EQ / Spectral Dynamic EQ");
     dynModeBox.onChange = [this] { setDynMode (dynModeBox.getSelectedId() - 1); };
-    typeBox.addItemList (typeNames, 1);
+    for (int i = 0; i < VintageFirst; ++i) typeBox.addItem (typeNames[i], i + 1);
+    for (int u = 0; u < numVintageUnits; ++u)
+    {
+        typeBox.addSeparator();
+        typeBox.addSectionHeading (juce::String ("Vintage: ") + vintageUnits[u]);
+        for (int i = 0; i < numVintage; ++i)
+            if (vintageDefs[i].unit == u) typeBox.addItem (vintageDefs[i].name, VintageFirst + i + 1);
+    }
     slopeBox.addItemList (slopeNames, 1);
     placeBox.addItemList (placementNames, 1);
     dirBox.addItemList (dirNames, 1);
@@ -1268,7 +1474,7 @@ bool BandPanel::isCut() const
     const int t = (int) proc.apvts.getRawParameterValue (pid (band, "type"))->load();
     return t == LowCut || t == HighCut;
 }
-int BandPanel::idealWidth() const { return 1220; }
+int BandPanel::idealWidth() const { return 1170; }
 
 void BandPanel::select (int b)
 {
@@ -1333,6 +1539,7 @@ void BandPanel::update()
     slopeBox.setVisible (c);
     dirBox.setVisible (d);
     scBtn.setVisible (d);
+    detectBtn.setVisible (d);
     gain.s.setVisible (m != ModeSpectral);   // a Spectral band has no static gain: only threshold / range / attack / release
     gain.l.setVisible (m != ModeSpectral);
     for (auto* k : { &thr, &range, &att, &rel }) { k->s.setVisible (d); k->l.setVisible (d); }
@@ -1539,6 +1746,7 @@ void BandPanel::refreshGroupControls()
     slopeBox.setVisible (anyCut);
     dirBox.setVisible (anyDyn);
     scBtn.setVisible (anyDyn);
+    detectBtn.setVisible (anyDyn);
     gain.s.setVisible (anyGain);
     gain.l.setVisible (anyGain);
     for (auto* k : { &thr, &range, &att, &rel }) { k->s.setVisible (anyDyn); k->l.setVisible (anyDyn); }
@@ -1562,7 +1770,7 @@ void BandPanel::resized()
     const bool cut = slopeBox.isVisible();
 
     // right cluster: Mode | Placement | Solo | close
-    auto rc = r.removeFromRight (224).withSizeKeepingCentre (224, 28);
+    auto rc = r.removeFromRight (228).withSizeKeepingCentre (228, 28);
     closeBtn.setBounds (rc.removeFromRight (22));
     rc.removeFromRight (4);
     soloBtn.setBounds (rc.removeFromRight (44));
@@ -1572,7 +1780,7 @@ void BandPanel::resized()
     dynModeBox.setBounds (rc.removeFromRight (76));
 
     // left cluster: enable | band number (with < >) | type | slope
-    auto lc = r.removeFromLeft (cut ? 270 : 186).withSizeKeepingCentre (cut ? 270 : 186, 28);
+    auto lc = r.removeFromLeft (cut ? 274 : 190).withSizeKeepingCentre (cut ? 274 : 190, 28);
     enBtn.setBounds (lc.removeFromLeft (28));
     lc.removeFromLeft (4);
     prevBtn.setBounds (lc.removeFromLeft (18));
@@ -1584,21 +1792,23 @@ void BandPanel::resized()
     slopeBox.setBounds (lc.removeFromLeft (76));
 
     // knobs: one centred group between the two clusters
-    const int cellS = 104, cellD = 94, scW = 66;
+    const int cellS = 124, cellD = 66, scW = 66;
     const int groupW = 3 * cellS + (dyn ? 10 + scW + 4 * cellD : 0);
-    auto g = r.withSizeKeepingCentre (juce::jmin (groupW, r.getWidth()), 60);
+    auto g = r.withSizeKeepingCentre (juce::jmin (groupW, r.getWidth()), 72);
     freq.place (g.removeFromLeft (cellS));
     gain.place (g.removeFromLeft (cellS));
     q.place    (g.removeFromLeft (cellS));
     if (dyn)
     {
         g.removeFromLeft (10);
-        auto tcol = g.removeFromLeft (scW).withSizeKeepingCentre (scW, 56);
-        scBtn.setBounds (tcol.removeFromTop (26));
-        tcol.removeFromTop (4);
-        dirBox.setBounds (tcol.removeFromTop (26));
+        auto tcol = g.removeFromLeft (scW).withSizeKeepingCentre (scW, 62);
+        scBtn.setBounds (tcol.removeFromTop (20));
+        tcol.removeFromTop (1);
+        dirBox.setBounds (tcol.removeFromTop (20));
+        tcol.removeFromTop (1);
+        detectBtn.setBounds (tcol.removeFromTop (20));
         for (auto* k : { &thr, &range, &att, &rel })
-            k->place (g.removeFromLeft (cellD));
+            k->place (g.removeFromLeft (cellD), true);
     }
 }
 
@@ -1606,8 +1816,8 @@ void BandPanel::resized()
 void ScaleStrip::timerCallback()
 {
     const float l = proc.peakL.exchange (0.0f), r = proc.peakR.exchange (0.0f);
-    lvL = juce::jmax (l, lvL * 0.94f);
-    lvR = juce::jmax (r, lvR * 0.94f);
+    lvL = juce::jmax (l, lvL * 0.88f);
+    lvR = juce::jmax (r, lvR * 0.88f);
     repaint();
 }
 
@@ -1801,6 +2011,8 @@ public:
         addAndMakeVisible (scaleSlider);
 
         charBox.addItemList (RP::charNames, 1);
+        linBox.addItemList (RP::linLenNames, 1);
+        linBox.setTooltip ("Linear Phase mode: FIR length = latency. Fast is best for low latency, Precise resolves narrow low frequency bands best. Mixed Phase always uses the fast setting.");
         rangeBox.addItemList (RP::rangeNames, 1);
         anaViewBox.addItemList (RP::anaViewNames, 1);
         anaRangeBox.addItemList (RP::anaRangeNames, 1);
@@ -1809,10 +2021,11 @@ public:
         anaTiltBox.addItemList (RP::anaTiltNames, 1);
         anaResBox.setTooltip ("Higher resolution = more precise lows, but slower reaction");
         anaTiltBox.setTooltip ("Spectrum tilt in dB per octave around 1 kHz. 4.5 dB/oct makes typical music look flat");
-        for (auto* c : std::initializer_list<juce::Component*> { &charBox, &rangeBox, &anaViewBox, &anaRangeBox, &anaResBox, &anaSpeedBox, &anaTiltBox,
+        for (auto* c : std::initializer_list<juce::Component*> { &charBox, &linBox, &rangeBox, &anaViewBox, &anaRangeBox, &anaResBox, &anaSpeedBox, &anaTiltBox,
                                                                  &analyzerBtn, &notesBtn, &invertBtn, &freezeBtn })
             addAndMakeVisible (c);
         charA     = std::make_unique<CA> (proc.apvts, "character", charBox);
+        linA      = std::make_unique<CA> (proc.apvts, "lin_len", linBox);
         rangeA    = std::make_unique<CA> (proc.apvts, "disp_range", rangeBox);
         anaViewA  = std::make_unique<CA> (proc.apvts, "ana_view", anaViewBox);
         analyzerA = std::make_unique<BA> (proc.apvts, "analyzer", analyzerBtn);
@@ -1840,7 +2053,7 @@ public:
             changed();
             if (onResetSize) onResetSize();
             scaleSlider.setValue (100.0, juce::dontSendNotification);
-            for (const char* id : { "out_gain", "mode", "character", "os", "disp_range", "analyzer", "ana_view", "ana_range", "ana_res", "ana_speed", "ana_tilt", "ana_freeze", "invert", "notes" })
+            for (const char* id : { "out_gain", "mode", "character", "os", "prec", "lin_len", "disp_range", "analyzer", "ana_view", "ana_range", "ana_res", "ana_speed", "ana_tilt", "ana_freeze", "invert", "notes" })
                 if (auto* prm = proc.apvts.getParameter (id))
                 {
                     prm->beginChangeGesture();
@@ -1850,7 +2063,7 @@ public:
         };
 
         refreshSelection();
-        setSize (590, 352);
+        setSize (590, 384);
     }
 
     void paint (juce::Graphics& g) override
@@ -1904,6 +2117,9 @@ public:
         y += 28;
         labels.push_back ({ "Character", { x1, y, 104, 24 } });
         charBox.setBounds (bx, y, bw, 24);
+        y += 28;
+        labels.push_back ({ "Linear latency", { x1, y, 104, 24 } });
+        linBox.setBounds (bx, y, bw, 24);
         y += 38;
         labels.push_back ({ "Analyzer", { x1, y, 200, 16 } });
         y += 20;
@@ -1978,9 +2194,9 @@ private:
     std::vector<std::unique_ptr<Swatch>> accentSw, themeSw;
     Swatch customSw;
     juce::Slider scaleSlider;
-    juce::ComboBox charBox, rangeBox, anaViewBox, anaRangeBox, anaResBox, anaSpeedBox, anaTiltBox;
+    juce::ComboBox charBox, linBox, rangeBox, anaViewBox, anaRangeBox, anaResBox, anaSpeedBox, anaTiltBox;
     juce::ToggleButton analyzerBtn { "Analyzer" }, notesBtn { "Piano view" }, invertBtn { "Phase invert" }, freezeBtn { "Freeze" };
-    std::unique_ptr<CA> charA, rangeA, anaViewA, anaRangeA, anaResA, anaSpeedA, anaTiltA;
+    std::unique_ptr<CA> charA, linA, rangeA, anaViewA, anaRangeA, anaResA, anaSpeedA, anaTiltA;
     std::unique_ptr<BA> analyzerA, notesA, invertA, freezeA;
     std::vector<std::pair<juce::String, juce::Rectangle<int>>> labels;
 };
@@ -1999,7 +2215,7 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
     root.resizedFn = [this] { layoutRoot(); };
     addAndMakeVisible (root);
 
-    for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &osL, &osBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
+    for (auto* c : std::initializer_list<juce::Component*> { &display, &strip, &modeBox, &osL, &osBox, &precBox, &presetPrev, &presetBtn, &presetNext, &presetSave,
                                                              &toolsBtn, &gearBtn, &analyzerBtn, &pianoBtn, &outL, &outSlider })
         root.addAndMakeVisible (c);
     root.addAndMakeVisible (panel);
@@ -2020,6 +2236,8 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
 
     modeBox.addItemList (modeNames, 1);
     osBox.addItemList (osNames, 1);
+    precBox.addItemList (precNames, 1);
+    precBox.setTooltip ("Filter processing precision: 64-bit (double) or 117-bit (double-double filter state, more CPU). The linear phase FIR always runs in 32-bit float convolution.");
     osBox.setTooltip ("Oversampling of the EQ bands: more accurate high frequencies, a few samples of latency. Natural Phase is always at least 2x. Not used in Linear Phase.");
     osL.setJustificationType (juce::Justification::centredRight);
     osL.setFont (juce::Font (juce::FontOptions (13.0f)));
@@ -2045,10 +2263,10 @@ RajvikEQAudioProcessorEditor::RajvikEQAudioProcessorEditor (RajvikEQAudioProcess
 
     modeA     = std::make_unique<CA> (p.apvts, "mode", modeBox);
     osA       = std::make_unique<CA> (p.apvts, "os", osBox);
+    precA     = std::make_unique<CA> (p.apvts, "prec", precBox);
     analyzerA = std::make_unique<BA> (p.apvts, "analyzer", analyzerBtn);
     pianoA    = std::make_unique<BA> (p.apvts, "notes", pianoBtn);
     pianoBtn.setTooltip ("Piano view: keyboard strip under the display, notes in the readouts");
-    panel.setBufferedToImage (true);   // the soft shadow is expensive: render the panel once, not on every analyzer frame
     outA      = std::make_unique<SA> (p.apvts, "out_gain", outSlider);
 
     display.onSketchDone = [this] { display.repaint(); };
@@ -2310,7 +2528,10 @@ void RajvikEQAudioProcessorEditor::layoutRoot()
     osL.setVisible (showOsL);  analyzerBtn.setVisible (showAna);  pianoBtn.setVisible (showPiano);  outL.setVisible (showOutL);
     modeBox.setBounds (bot.removeFromLeft (bw < 540 ? 104 : 124));  bot.removeFromLeft (6);
     if (showOsL) osL.setBounds (bot.removeFromLeft (88));
-    osBox.setBounds (bot.removeFromLeft (58));  bot.removeFromLeft (8);
+    osBox.setBounds (bot.removeFromLeft (58));  bot.removeFromLeft (6);
+    precBox.setVisible (bw >= 640);
+    if (bw >= 640) { precBox.setBounds (bot.removeFromLeft (74));  bot.removeFromLeft (6); }
+    bot.removeFromLeft (2);
     if (showAna) analyzerBtn.setBounds (bot.removeFromLeft (88));
     if (showPiano) pianoBtn.setBounds (bot.removeFromLeft (70));
     outSlider.setBounds (bot.removeFromRight (juce::jlimit (60, 300, bot.getWidth() - (showOutL ? 52 : 0))));
@@ -2321,7 +2542,8 @@ void RajvikEQAudioProcessorEditor::layoutRoot()
     auto stripCol = r.removeFromRight (stripW);
     {
         const float winScale = juce::jlimit (0.5f, 1.8f, juce::jmin ((float) r.getWidth() / 960.0f, (float) r.getHeight() / 480.0f));
-        float f = juce::jmin ((float) r.getWidth() / (float) panel.idealWidth(), winScale);
+        juce::ignoreUnused (winScale);
+        float f = juce::jmin (1.0f, (float) r.getWidth() / (float) panel.idealWidth());
         f = juce::jmin (f, ((float) r.getHeight() - 120.0f) / (float) BandPanel::totalHeight);
         dockScale = juce::jlimit (0.3f, 1.8f, f);
         const int dockH = (int) std::ceil ((float) BandPanel::totalHeight * dockScale);

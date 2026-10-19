@@ -23,6 +23,7 @@ public:
     juce::Point<float> getNodePos (int b) const { return nodePos (b); }
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
@@ -48,6 +49,17 @@ private:
     juce::Point<float> nodePos (int b) const;
     float freqToX (float f) const;
     float xToFreq (float x) const;
+    // horizontal zoom of the frequency axis (to place bands precisely): view range in Hz, 10 Hz .. 20 kHz at full view
+    float viewLo = 10.0f, viewHi = 20000.0f;
+    bool axisDrag = false;
+    float axisLastX = 0.0f;
+    void setView (float lo, float hi);
+    void zoomAt (float x, float k);      // k < 1 zooms in around pixel x, k > 1 zooms out
+    void panBy (float dxPixels);         // positive moves the view towards higher frequencies
+    void resetZoom() { setView (10.0f, 20000.0f); }
+    bool isZoomed() const { return viewLo > 10.5f || viewHi < 19000.0f; }
+    juce::Rectangle<float> zoomBtn (int i) const;   // 0 = zoom out, 1 = zoom in, 2 = fit
+    bool inAxisStrip (juce::Point<float> p) const { return p.y > (float) getHeight() - 24.0f; }
     float gainToY (float g) const;
     float yToGain (float y) const;
     float dispRange() const;
@@ -113,7 +125,7 @@ public:
     {
         setMouseCursor (juce::MouseCursor::PointingHandCursor);
         setTooltip ("Click to choose the EQ range (+/- dB shown by the display)");
-        startTimerHz (60);
+        startTimerHz (30);
     }
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -131,7 +143,7 @@ class BandPanel : public juce::Component
 {
 public:
     explicit BandPanel (RajvikEQAudioProcessor&);
-    static constexpr int totalHeight = 80;
+    static constexpr int totalHeight = 96;
 
     std::function<void()> onClose;
     std::function<void (int)> onStep;
@@ -146,12 +158,29 @@ public:
     void resized() override;
 
 private:
+    // Slider that also resets with Ctrl / Cmd + click (double click is handled by the Slider itself)
+    struct ResetSlider : public juce::Slider
+    {
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if ((e.mods.isCtrlDown() || e.mods.isCommandDown()) && isDoubleClickReturnEnabled())
+            {
+                startedDragging();
+                setValue (getDoubleClickReturnValue(), juce::sendNotificationSync);
+                stoppedDragging();
+                return;
+            }
+            juce::Slider::mouseDown (e);
+        }
+    };
+
     struct Knob
     {
-        juce::Slider s;
+        ResetSlider s;
         juce::Label l;
+        bool vertical = false;
         void init (juce::Component& parent, const juce::String& name, bool bipolar = false);
-        void place (juce::Rectangle<int> r);
+        void place (juce::Rectangle<int> r, bool vert = false);
     };
 
     enum { KFreq, KGain, KQ, KThr, KRange, KAtt, KRel, numKnobs };
@@ -179,7 +208,7 @@ private:
     bool lastCut = false, lastCanDyn = true;
     juce::Label numLabel;
     juce::ToggleButton enBtn, scBtn { "Sidechain" };
-    juce::TextButton closeBtn, prevBtn, nextBtn, soloBtn { "Solo" };
+    juce::TextButton closeBtn, prevBtn, nextBtn, soloBtn { "Solo" }, detectBtn { "Detect" };
     juce::ComboBox typeBox, slopeBox, placeBox, dirBox, dynModeBox;
     Knob freq, gain, q, thr, range, att, rel;
 
@@ -261,7 +290,7 @@ private:
     juce::Rectangle<int> dockRect;   // the band strip docked above the bottom bar
     float dockScale = 1.0f;
 
-    juce::ComboBox modeBox, osBox;
+    juce::ComboBox modeBox, osBox, precBox;
     juce::Label outL, osL;
     juce::TextButton presetBtn { "Init" }, presetPrev { "<" }, presetNext { ">" }, presetSave { "Save" }, toolsBtn;
     GearButton gearBtn;
@@ -271,7 +300,7 @@ private:
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-    std::unique_ptr<CA> modeA, osA;
+    std::unique_ptr<CA> modeA, osA, precA;
     std::unique_ptr<BA> analyzerA, pianoA;
     std::unique_ptr<SA> outA;
 
