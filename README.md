@@ -111,3 +111,42 @@ Double-click empty area to add a band. Click a band and a panel opens, docked at
 - The band strip is docked under the display and ends at the left edge of the meter section (it no longer runs under the meters). It scales with the window.
 - Click the meter / scale section (the range badge or anywhere on it) to choose the EQ range: +/-3, 6, 12, 18, 24, 30, 36 or 48 dB. The mouse wheel over the section also steps the range. The same list is in the settings menu ("Display Range"). Default 12 dB.
 - The analyzer dB numbers on the meter section now follow the analyzer range setting.
+
+## v12: clearer controls, value bubbles, reset, analogue-style filters
+- **Band strip is larger and crisp.** The strip is 96 px high at natural size and is only ever scaled down (never up) when the window is narrow; image buffering was removed, so text and knobs stay sharp at every scale. Gain / Frequency / Q knobs are bigger, with the name and a bold value beside them. Dynamic / Spectral knobs (Threshold, Range, Attack, Release) have their value under the knob.
+- **Value bubble above every knob.** Hover or drag a knob and its value (e.g. +4.94 dB, 2.73 kHz, 1.38) appears in a large bubble above it. Works for Freq, Gain, Q and all the dynamic knobs.
+- **Reset:** double click a knob = default value. Ctrl / Cmd + click also resets it.
+- **Nyquist-matched bell.** The Bell now uses a matched design (poles by matched-z, numerator fitted at DC, centre and Nyquist) above ~3 % of the sample rate, so the response follows the analogue prototype up to the top of the spectrum instead of cramping (error vs analogue at 10-15 kHz is 3-6x smaller than a plain bilinear bell, tested). Low frequencies use the classic design, where it is already exact. Falls back automatically for extreme settings.
+- **New analogue-style filter types** (all have gain, all work as Dynamic / Spectral bands too):
+  - *Vintage Bell*: proportional Q, narrower the more you boost / cut (console style).
+  - *Sword*: narrow core with a wide opposite skirt, steeper flanks than a bell, to dig out resonances.
+  - *Tube Low / Tube High*: boost with a dip next to the corner (the "boost + attenuate" curve), plain shelf for cuts.
+  - *Baxandall Low / High*: gentle first-order (6 dB/oct) shelves.
+
+## v13: 117-bit, Mixed Phase, 32 vintage-style types, relative / onset detection
+- **117-bit precision** (bottom bar, "64-bit / 117-bit"): the band filters keep their state in double-double arithmetic (about 106 bit mantissa) instead of double. Coefficients are still designed in double; the linear phase FIR is a float convolution. Tested: error of a 40 Hz Q=8 bell vs an 80-bit reference drops from about 1e-12 to about 4e-16. More CPU.
+- **Mixed Phase** (new processing mode): every static band is split by its frequency (smoothstep from 150 Hz to 3 kHz). The low part stays a minimum phase biquad, the FIR carries only what is left (full response divided by the minimum phase part), so the sum is exactly the full band. Low bands are almost entirely minimum phase, high bands almost entirely linear phase. Latency is that of the Linear Phase mode (4096 samples). Dynamic and Mid/Side bands run as minimum phase, like in Linear Phase mode.
+- **32 vintage-style filter types in 9 units** (type menu, "Vintage: ..." sub menus): Passive Tube, Brit Console, American Console, Studio Console, Air Band, Passive Mastering, Tube Program, Mastering Parametric, Tone Control. They are parametric interpretations of the classic behaviours (proportional Q, shelf overshoot, boost + attenuate interaction, passive wide bells, 6 dB/oct tone shelves), not measurements of specific devices and not circuit simulations. The frequency of every type is freely adjustable, all of them have gain, can be Dynamic / Spectral bands and mix freely with every other type. Neutral names are used on purpose (no hardware brand names).
+- **Relative detection and Onset detection** (Dynamic bands, "Detect" button in the band strip): Relative 0-100 % compares the band level with a reference (the whole signal, or a freely set band: Reference = Band, frequency, Q); at 100 % the dynamics follow the band's share of the reference level (threshold is then in dB relative to the reference). Onsets 0-100 % mixes in a detector that reacts to the rising edge of the band level. Spectral bands use the FFT detector and ignore these two.
+
+## v14: lower latency, lower CPU, safer output
+Latency (samples; ms at 44.1 kHz):
+| Mode | before | now |
+|---|---|---|
+| Zero Latency | 0 | 0 (plus the oversampling filter if oversampling is on) |
+| Natural Phase | oversampling filter only | same |
+| Linear Phase | 4096 (93 ms) | Fast 1024 (23 ms), Balanced 2048 (46 ms, default), Precise 4096 (93 ms): settings menu, "Linear latency" |
+| Mixed Phase | (new in v13) 4096 | 1024 (23 ms): the lows stay minimum phase, so a short FIR is enough |
+| Spectral Dynamic band (added to any mode) | 2048 (46 ms) | 1024 (23 ms) |
+
+CPU:
+- Gain bands with 0 dB gain cost nothing (flat filters are skipped, the on / off crossfade keeps it click free); disabled bands cost nothing.
+- Measured on the filter math alone: 24 active bell bands in 64-bit take about 0.4 % of one core at 48 kHz (1 band: 0.03 %). 117-bit costs about 15x more (about 6 % for 24 bands), so 64-bit is the default.
+- The Linear / Mixed FIR is shorter (Mixed 2048, Linear 2048 by default instead of 8192), so the convolution is 2-4x cheaper. The spectral FFT is half the size.
+- The editor runs at 30 fps while idle (60 fps while you interact), skips all analysis and drawing while it is hidden, and the meter was halved to 30 fps.
+- Safety: a NaN / infinity / runaway value anywhere in the chain silences that block and restarts the filters instead of reaching the output.
+- Spectral bands at 100 Hz and below are a little less precise with the shorter FFT (bin width 43 Hz at 44.1 kHz); thresholds still agree with the Dynamic detector within about 1-2 dB.
+
+## v15: mode dependent Spectral latency, horizontal zoom
+- **Spectral Dynamic latency follows the mode:** Zero Latency 512 samples (about 11 ms at 44.1 kHz), Natural Phase and Mixed Phase 1024 (23 ms), Linear Phase 2048 (46 ms: best frequency resolution where latency is high anyway). At 88.2 / 96 kHz the size is one step larger so the time stays similar. Tested: impulse delay equals the FFT size in all three, and the 1 kHz cut / detector level are identical in all three sizes. The smaller FFT resolves narrow low bands less precisely (bin width 86 Hz at 512), which is the price of the low latency.
+- **Horizontal zoom of the EQ display** to place bands on exact frequencies: Ctrl / Cmd / Alt + mouse wheel zooms around the cursor, the plain wheel on the frequency axis (bottom strip) zooms too, Shift + wheel or a horizontal swipe scrolls, dragging the frequency axis scrolls, double click on the axis (or the "Fit" button) shows the full range. Buttons "-", "+", "Fit" at the top left of the display; the visible range and a scroll bar are shown while zoomed. The grid adds finer lines and labels when you zoom in. Everything (nodes, curves, analyzer, piano, band shading) follows the zoom. EQ Match and Auto Peaks reset the zoom (they work on the whole spectrum).
